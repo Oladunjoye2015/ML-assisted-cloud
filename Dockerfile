@@ -22,4 +22,4 @@ ENV LOG_DIR=logs
 
 RUN mkdir -p /app/logs
 
-CMD sh -c "uvicorn main:app --host 0.0.0.0 --port ${PORT}"
+CMD sh -c "uvicorn fx_api_sniper_CLperpair:app --host 0.0.0.0 --port ${PORT}"
