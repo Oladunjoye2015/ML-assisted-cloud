@@ -62,7 +62,7 @@ PAIR_GATES: Dict[str, Dict[str, float]] = {
     "USD_CAD": {"conf": 0.55, "margin": 0.10},
     "CAD_JPY": {"conf": 0.70, "margin": 0.10},
     "AUD_JPY": {"conf": 0.70, "margin": 0.08},
-    "USD_JPY": {"conf": 0.50, "margin": 0.10},
+    "USD_JPY": {"conf": 0.70, "margin": 0.10},
     "EUR_JPY": {"conf": 0.70, "margin": 0.15},
     "GBP_JPY": {"conf": 0.70, "margin": 0.12},
     "EUR_USD": {"conf": 0.55, "margin": 0.10},
@@ -81,8 +81,8 @@ PAIR_DISAGREE_CONF: Dict[str, float] = {
     "EUR_USD": 0.65,
     "NZD_USD": 0.75,
     "GBP_USD": 0.65,
-    "USD_JPY": 0.50,
-    "AUD_USD": 0.75,
+    "USD_JPY": 0.80,
+    "AUD_USD": 0.80,
     "EUR_JPY": 0.80,
 }
 DEFAULT_DISAGREE_CONF = float(os.getenv("DEFAULT_DISAGREE_CONF", "0.70"))
