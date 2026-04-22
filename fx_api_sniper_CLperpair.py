@@ -29,7 +29,7 @@ TRADES_CSV = os.path.join(LOG_DIR, "trades.csv")
 
 MAX_HOLD_MINUTES = int(os.getenv("MAX_HOLD_MINUTES", "60"))
 AUTO_CLOSE_ENABLED = os.getenv("AUTO_CLOSE_ENABLED", "true").lower() == "true"
-AUTO_CLOSE_CHECK_SECONDS = int(os.getenv("AUTO_CLOSE_CHECK_SECONDS", "60"))
+AUTO_CLOSE_CHECK_SECONDS = int(os.getenv("AUTO_CLOSE_CHECK_SECONDS", "1800"))
 
 OANDA_TOKEN = os.getenv("OANDA_TOKEN", "").strip()
 OANDA_ACCOUNT_ID = os.getenv("OANDA_ACCOUNT_ID", "").strip()
@@ -903,6 +903,60 @@ def auto_close_worker() -> None:
 
         time.sleep(AUTO_CLOSE_CHECK_SECONDS)
 
+
+
+def auto_close_worker() -> None:
+    while True:
+        try:
+            if not AUTO_CLOSE_ENABLED:
+                time.sleep(AUTO_CLOSE_CHECK_SECONDS)
+                continue
+
+            if not _open_trade_meta:
+                time.sleep(AUTO_CLOSE_CHECK_SECONDS)
+                continue
+
+            if not broker_can_close():
+                time.sleep(AUTO_CLOSE_CHECK_SECONDS)
+                continue
+
+            now = now_utc()
+
+            for order_id, meta in list(_open_trade_meta.items()):
+                opened_at = meta.get("opened_at_dt")
+                if opened_at is None:
+                    continue
+
+                age_minutes = (now - opened_at).total_seconds() / 60.0
+                if age_minutes < MAX_HOLD_MINUTES:
+                    continue
+
+                close_result = close_oanda_trade(order_id, int(meta["units_signed"]))
+                if not close_result.get("ok"):
+                    continue
+
+                row = {
+                    "instrument": meta["instrument"],
+                    "side": meta["side"],
+                    "units_signed": meta["units_signed"],
+                    "entry_price": meta["entry_price"],
+                    "sl_price": meta["sl_price"],
+                    "tp_price": meta["tp_price"],
+                    "status": "MANUAL",
+                    "pnl": None,
+                    "order_id": order_id,
+                    "reason": f"Max hold time reached ({MAX_HOLD_MINUTES}m)",
+                    "pair_score": meta.get("pair_score"),
+                    "ts": utc_ts(),
+                }
+                write_trade_row(row)
+                note_trade_closed(order_id)
+                _open_trade_meta.pop(order_id, None)
+
+        except Exception:
+            pass
+
+        time.sleep(AUTO_CLOSE_CHECK_SECONDS)
 # ====================================================
 # APP
 # ====================================================
