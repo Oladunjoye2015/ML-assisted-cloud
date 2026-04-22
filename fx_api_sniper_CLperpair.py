@@ -1,5 +1,5 @@
 from __future__ import annotations
-import os, csv, glob, math, json, hashlib, datetime as dt
+import os, csv, glob, math, json, hashlib, datetime as dt, sqlite3, threading, time
 from collections import deque
 from pathlib import Path
 from decimal import Decimal, ROUND_HALF_UP
@@ -8,26 +8,35 @@ from typing import Any, Dict, Optional, Literal, List, Tuple
 import joblib
 import numpy as np
 import pandas as pd
+import requests
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, FileResponse
 from pydantic import BaseModel, ConfigDict
 
-# env
+# ====================================================
+# ENV
+# ====================================================
 MODELS_DIR = os.getenv("MODELS_DIR", "models")
 LOG_DIR = os.getenv("LOG_DIR", "logs")
 DATA_DIR = os.getenv("DATA_DIR", "oanda_h1_ba_live")
+DB_PATH = os.getenv("DB_PATH", os.path.join(LOG_DIR, "fx_trading.db"))
+
 os.makedirs(LOG_DIR, exist_ok=True)
 os.makedirs(MODELS_DIR, exist_ok=True)
 
 AUDIT_CSV = os.path.join(LOG_DIR, "audit.csv")
 TRADES_CSV = os.path.join(LOG_DIR, "trades.csv")
 
-DEFAULT_GATE = {
-    "conf": float(os.getenv("CONF_GATE", "0.54")),
-    "margin": float(os.getenv("MARGIN_GATE", "0.04")),
-}
+MAX_HOLD_MINUTES = int(os.getenv("MAX_HOLD_MINUTES", "60"))
+AUTO_CLOSE_ENABLED = os.getenv("AUTO_CLOSE_ENABLED", "true").lower() == "true"
+AUTO_CLOSE_CHECK_SECONDS = int(os.getenv("AUTO_CLOSE_CHECK_SECONDS", "60"))
 
-# Kept pairs only
+OANDA_TOKEN = os.getenv("OANDA_TOKEN", "").strip()
+OANDA_ACCOUNT_ID = os.getenv("OANDA_ACCOUNT_ID", "").strip()
+OANDA_BASE_URL = os.getenv("OANDA_BASE_URL", "https://api-fxtrade.oanda.com").strip()
+
+DEFAULT_GATE = {"conf": float(os.getenv("CONF_GATE", "0.54")), "margin": float(os.getenv("MARGIN_GATE", "0.04"))}
+
 PAIR_GATES: Dict[str, Dict[str, float]] = {
     "EUR_GBP": {"conf": 0.57, "margin": 0.05},
     "USD_CAD": {"conf": 0.54, "margin": 0.04},
@@ -69,8 +78,8 @@ MIN_ATR_JPY = float(os.getenv("MIN_ATR_JPY", "0.005"))
 USE_EQUITY_SIZING = os.getenv("USE_EQUITY_SIZING", "true").lower() == "true"
 DEFAULT_EQUITY = float(os.getenv("DEFAULT_EQUITY", "200"))
 RISK_PCT = float(os.getenv("RISK_PCT", "0.005"))
-MIN_PAIR_SCORE_TO_TRADE = float(os.getenv("MIN_PAIR_SCORE_TO_TRADE", "0.45"))
-MIN_TRADES_FOR_PAIR_SCORING = int(os.getenv("MIN_TRADES_FOR_PAIR_SCORING", "8"))
+MIN_PAIR_SCORE_TO_TRADE = float(os.getenv("MIN_PAIR_SCORE_TO_TRADE", "0.25"))
+MIN_TRADES_FOR_PAIR_SCORING = int(os.getenv("MIN_TRADES_FOR_PAIR_SCORING", "20"))
 AUC_WEIGHT = float(os.getenv("AUC_WEIGHT", "0.80"))
 WINRATE_WEIGHT = float(os.getenv("WINRATE_WEIGHT", "0.20"))
 MIN_UNITS_JPY = int(os.getenv("MIN_UNITS_JPY", "100"))
@@ -81,7 +90,6 @@ DEFAULT_SL_ATR = float(os.getenv("DEFAULT_SL_ATR", "1.0"))
 DEFAULT_TP_ATR = float(os.getenv("DEFAULT_TP_ATR", "1.3"))
 BAR_HISTORY_LEN = int(os.getenv("BAR_HISTORY_LEN", "300"))
 
-# Kept pairs only
 PAIR_MAP: Dict[str, str] = {
     "EURGBP": "EUR_GBP",
     "USDCAD": "USD_CAD",
@@ -104,7 +112,11 @@ _bar_history: Dict[str, deque] = {pair6: deque(maxlen=BAR_HISTORY_LEN) for pair6
 _trade_count_today: Dict[str, int] = {}
 _trade_day = dt.datetime.now(dt.timezone.utc).date()
 _open_trade_ids: set[str] = set()
+_open_trade_meta: Dict[str, Dict[str, Any]] = {}
 
+# ====================================================
+# UTILS
+# ====================================================
 def utc_ts() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat()
 
@@ -192,6 +204,77 @@ def infer_session_code(ts_utc: dt.datetime) -> int:
         return 2
     return 3
 
+# ====================================================
+# SQLITE
+# ====================================================
+def db_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db() -> None:
+    conn = db_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS trade_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT,
+            instrument TEXT,
+            side TEXT,
+            units_signed INTEGER,
+            entry_price REAL,
+            sl_price REAL,
+            tp_price REAL,
+            status TEXT,
+            pnl REAL,
+            order_id TEXT,
+            reason TEXT,
+            pair_score REAL
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_trade_events_order_id ON trade_events(order_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_trade_events_status ON trade_events(status)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_trade_events_ts ON trade_events(ts)")
+    conn.commit()
+    conn.close()
+
+def insert_trade_event_db(row: Dict[str, Any]) -> None:
+    conn = db_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO trade_events
+        (ts, instrument, side, units_signed, entry_price, sl_price, tp_price, status, pnl, order_id, reason, pair_score)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        row.get("ts"),
+        row.get("instrument"),
+        row.get("side"),
+        row.get("units_signed"),
+        row.get("entry_price"),
+        row.get("sl_price"),
+        row.get("tp_price"),
+        row.get("status"),
+        row.get("pnl"),
+        row.get("order_id"),
+        row.get("reason"),
+        row.get("pair_score"),
+    ))
+    conn.commit()
+    conn.close()
+
+def read_trade_events_db() -> pd.DataFrame:
+    conn = db_conn()
+    try:
+        df = pd.read_sql_query("SELECT * FROM trade_events ORDER BY ts DESC", conn)
+        if not df.empty and "ts" in df.columns:
+            df["ts"] = pd.to_datetime(df["ts"], errors="coerce")
+        return df
+    finally:
+        conn.close()
+
+# ====================================================
+# CSV
+# ====================================================
 def write_csv_row(path: str, row: Dict[str, Any]) -> None:
     exists = os.path.exists(path)
     with open(path, "a", newline="") as f:
@@ -205,6 +288,7 @@ def write_audit_row(out: Dict[str, Any]) -> None:
 
 def write_trade_row(row: Dict[str, Any]) -> None:
     write_csv_row(TRADES_CSV, row)
+    insert_trade_event_db(row)
 
 def read_csv_df(path: str) -> pd.DataFrame:
     if not os.path.exists(path):
@@ -221,6 +305,9 @@ def read_audit_df() -> pd.DataFrame:
     return read_csv_df(AUDIT_CSV)
 
 def read_trades_df() -> pd.DataFrame:
+    db_df = read_trade_events_db()
+    if not db_df.empty:
+        return db_df
     return read_csv_df(TRADES_CSV)
 
 def read_closed_trades_df() -> pd.DataFrame:
@@ -234,6 +321,9 @@ def safe_bool_series(df: pd.DataFrame, col: str) -> pd.Series:
         return pd.Series(dtype=bool)
     return df[col].astype(str).str.lower().isin(["true", "1", "yes"])
 
+# ====================================================
+# TRADE STATE
+# ====================================================
 def _check_daily_reset() -> None:
     global _trade_day
     today = dt.datetime.now(dt.timezone.utc).date()
@@ -267,6 +357,9 @@ def note_trade_closed(order_id: Optional[str]) -> None:
     if order_id and order_id in _open_trade_ids:
         _open_trade_ids.remove(order_id)
 
+# ====================================================
+# SIGNAL DUP CHECK
+# ====================================================
 def make_signal_fingerprint(instrument: str, side: str, bar_time: int, mid_c: float, tf: Optional[str]) -> str:
     raw = {
         "instrument": instrument,
@@ -287,6 +380,9 @@ def is_duplicate_signal(pair6: str, fingerprint: str) -> bool:
 def remember_signal(pair6: str, fingerprint: str) -> None:
     _recent_signals.setdefault(pair6, deque()).append((now_unix(), fingerprint))
 
+# ====================================================
+# TECHNICALS
+# ====================================================
 def rsi(series: pd.Series, period: int = 14) -> pd.Series:
     delta = series.diff()
     up = delta.clip(lower=0.0)
@@ -298,10 +394,7 @@ def rsi(series: pd.Series, period: int = 14) -> pd.Series:
 
 def atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
     prev_close = close.shift(1)
-    tr = pd.concat(
-        [high - low, (high - prev_close).abs(), (low - prev_close).abs()],
-        axis=1,
-    ).max(axis=1)
+    tr = pd.concat([high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
     return tr.ewm(alpha=1 / period, adjust=False).mean()
 
 def adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> Tuple[pd.Series, pd.Series, pd.Series]:
@@ -310,10 +403,7 @@ def adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> 
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     prev_close = close.shift(1)
-    tr = pd.concat(
-        [high - low, (high - prev_close).abs(), (low - prev_close).abs()],
-        axis=1,
-    ).max(axis=1)
+    tr = pd.concat([high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
     atr_sm = tr.ewm(alpha=1 / period, adjust=False).mean().replace(0, np.nan)
     plus_di = 100 * pd.Series(plus_dm, index=high.index).ewm(alpha=1 / period, adjust=False).mean() / atr_sm
     minus_di = 100 * pd.Series(minus_dm, index=high.index).ewm(alpha=1 / period, adjust=False).mean() / atr_sm
@@ -341,7 +431,6 @@ def seed_history_from_csv(data_dir: str) -> None:
     root = Path(data_dir)
     if not root.exists():
         return
-
     for pair6 in PAIR_MAP:
         path = root / f"{pair6}.csv"
         if not path.exists():
@@ -351,14 +440,12 @@ def seed_history_from_csv(data_dir: str) -> None:
             req = {"time", "bid_o", "bid_h", "bid_l", "bid_c", "ask_o", "ask_h", "ask_l", "ask_c"}
             if not req.issubset(df.columns):
                 continue
-
             df["time"] = pd.to_datetime(df["time"], utc=True, errors="coerce")
             df = df.dropna(subset=["time"])
             df["mid_o"] = (pd.to_numeric(df["bid_o"], errors="coerce") + pd.to_numeric(df["ask_o"], errors="coerce")) / 2.0
             df["mid_h"] = (pd.to_numeric(df["bid_h"], errors="coerce") + pd.to_numeric(df["ask_h"], errors="coerce")) / 2.0
             df["mid_l"] = (pd.to_numeric(df["bid_l"], errors="coerce") + pd.to_numeric(df["ask_l"], errors="coerce")) / 2.0
             df["mid_c"] = (pd.to_numeric(df["bid_c"], errors="coerce") + pd.to_numeric(df["ask_c"], errors="coerce")) / 2.0
-
             q = deque(maxlen=BAR_HISTORY_LEN)
             for _, r in df.iterrows():
                 q.append({
@@ -373,13 +460,14 @@ def seed_history_from_csv(data_dir: str) -> None:
         except Exception:
             continue
 
+# ====================================================
+# FEATURES / GATES / SIZING
+# ====================================================
 def build_runtime_feature_row(payload: Dict[str, Any], pair6: str, instrument: str, feat_order: List[str]) -> Dict[str, Any]:
     ps = instrument_pip_size(instrument)
     hist = update_bar_history(pair6, payload)
-
     for c in ["mid_o", "mid_h", "mid_l", "mid_c"]:
         hist[c] = pd.to_numeric(hist[c], errors="coerce")
-
     ts = pd.to_datetime(safe_int(payload.get("t")), unit="s", utc=True, errors="coerce")
     if pd.isna(ts):
         ts = pd.Timestamp.utcnow()
@@ -393,7 +481,6 @@ def build_runtime_feature_row(payload: Dict[str, Any], pair6: str, instrument: s
     spread_c = safe_float(payload.get("spread_c"), np.nan)
     bid_c = safe_float(payload.get("bid_c"), np.nan)
     ask_c = safe_float(payload.get("ask_c"), np.nan)
-
     if not np.isfinite(spread_c) or spread_c <= 0:
         if np.isfinite(bid_c) and np.isfinite(ask_c) and ask_c >= bid_c:
             spread_c = ask_c - bid_c
@@ -513,14 +600,12 @@ def payload_sanity_checks(payload: Dict[str, Any], instrument: str) -> Optional[
         return "Bad payload: negative spread_pips"
     if safe_float(payload.get("spread_atr"), 0.0) < 0:
         return "Bad payload: negative spread_atr"
-
     return None
 
 def pair_live_stats(instrument: str) -> Dict[str, Any]:
     df = read_closed_trades_df()
     if df.empty or "instrument" not in df.columns:
         return {"n": 0, "win_rate": None, "avg_pnl": None, "net_pnl": 0.0}
-
     sub = df[df["instrument"] == instrument].copy()
     if sub.empty:
         return {"n": 0, "win_rate": None, "avg_pnl": None, "net_pnl": 0.0}
@@ -528,7 +613,6 @@ def pair_live_stats(instrument: str) -> Dict[str, Any]:
     pnl = pd.to_numeric(sub.get("pnl"), errors="coerce").fillna(0.0)
     n = int(len(sub))
     wins = int((pnl > 0).sum())
-
     return {
         "n": n,
         "win_rate": (wins / n if n else None),
@@ -540,10 +624,8 @@ def compute_pair_score(instrument: str, avg_auc: float) -> float:
     live = pair_live_stats(instrument)
     n = int(live["n"])
     auc_norm = max(0.0, min(1.0, (avg_auc - 0.50) / 0.10))
-
     if n < MIN_TRADES_FOR_PAIR_SCORING or live["win_rate"] is None:
         return auc_norm
-
     wr = max(0.0, min(1.0, float(live["win_rate"])))
     return max(0.0, min(1.0, (AUC_WEIGHT * auc_norm) + (WINRATE_WEIGHT * wr)))
 
@@ -561,7 +643,6 @@ def compute_units_dynamic(
         return 0
 
     base = base_units_for_instrument(instrument)
-
     if USE_EQUITY_SIZING:
         risk_cap = equity_used * RISK_PCT
         risk_per_1000 = float(sl_pips) * pip_value_per_1000(instrument)
@@ -625,6 +706,9 @@ def compute_sl_tp_prices(
     tp_pips = abs(tp_price_f - mid_c_f) / pip
     return float(sl_pips), float(tp_pips), sl_str, tp_str
 
+# ====================================================
+# MODEL LOADING
+# ====================================================
 def normalize_bundle(path: str, raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     pair_raw = str(raw.get("pair", "")).upper().replace("_", "")
     if not pair_raw:
@@ -662,7 +746,6 @@ def load_bundles(models_dir: str) -> Dict[str, Dict[str, Any]]:
     bundles: Dict[str, Dict[str, Any]] = {}
     seen = set()
     patterns = ["*.joblib", "*_bundle.joblib"]
-
     for pat in patterns:
         for path in sorted(glob.glob(os.path.join(models_dir, pat))):
             if path in seen:
@@ -677,23 +760,23 @@ def load_bundles(models_dir: str) -> Dict[str, Dict[str, Any]]:
                     bundles[b["pair6"]] = b
             except Exception:
                 continue
-
     return bundles
 
 BUNDLES = load_bundles(MODELS_DIR)
 
+# ====================================================
+# PAYLOAD MODELS
+# ====================================================
 class TVPayload(BaseModel):
     model_config = ConfigDict(extra="allow")
     type: Optional[str] = "fx"
     symbol: str
     tf: Optional[str] = None
     t: int
-
     mid_o: float
     mid_h: float
     mid_l: float
     mid_c: float
-
     ema20: Optional[float] = 0.0
     ema50: Optional[float] = 0.0
     ema200: Optional[float] = 0.0
@@ -701,25 +784,21 @@ class TVPayload(BaseModel):
     adx14: Optional[float] = 0.0
     atr14: Optional[float] = 0.0
     macdh: Optional[float] = 0.0
-
     ret1: Optional[float] = 0.0
     ret3: Optional[float] = 0.0
     ret6: Optional[float] = 0.0
     ret12: Optional[float] = 0.0
     ret24: Optional[float] = None
-
     d20: Optional[float] = 0.0
     d50: Optional[float] = 0.0
     d200: Optional[float] = 0.0
     s20: Optional[float] = 0.0
     s50: Optional[float] = 0.0
     s200: Optional[float] = 0.0
-
     bbw: Optional[float] = 0.0
     spread_c: Optional[float] = None
     spread_atr: Optional[float] = None
     spread_pips: Optional[float] = None
-
     trend_regime: Optional[int] = 0
     vol_regime: Optional[int] = 0
     hr: Optional[int] = None
@@ -727,20 +806,16 @@ class TVPayload(BaseModel):
     dow: Optional[int] = None
     month: Optional[int] = None
     session: Optional[int] = None
-
     plus_di14: Optional[float] = None
     minus_di14: Optional[float] = None
     ema50_h4: Optional[float] = None
     adx14_h4: Optional[float] = None
     ema20_d1: Optional[float] = None
     rsi14_d1: Optional[float] = None
-
     bid_c: Optional[float] = None
     ask_c: Optional[float] = None
-
     equity: Optional[float] = None
     nav: Optional[float] = None
-
     hint_side: Optional[str] = None
     force_decision: Optional[Literal["BUY", "SELL"]] = None
     force_units_abs: Optional[int] = None
@@ -762,12 +837,88 @@ class TradeEvent(BaseModel):
 def make_out(**kwargs) -> Dict[str, Any]:
     return kwargs
 
-app = FastAPI(title="FX Sniper Per Pair", version="6.0-clean")
+# ====================================================
+# AUTO CLOSE
+# ====================================================
+def broker_can_close() -> bool:
+    return bool(OANDA_TOKEN and OANDA_ACCOUNT_ID and OANDA_BASE_URL)
+
+def close_oanda_trade(order_id: str, units_signed: int) -> Dict[str, Any]:
+    if not broker_can_close():
+        return {"ok": False, "error": "Missing OANDA env vars"}
+
+    trade_id = str(order_id)
+    url = f"{OANDA_BASE_URL}/v3/accounts/{OANDA_ACCOUNT_ID}/trades/{trade_id}/close"
+    headers = {
+        "Authorization": f"Bearer {OANDA_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    payload = {"longUnits": "ALL"} if units_signed > 0 else {"shortUnits": "ALL"}
+
+    try:
+        r = requests.put(url, headers=headers, json=payload, timeout=20)
+        if r.status_code in (200, 201):
+            return {"ok": True, "data": r.json()}
+        return {"ok": False, "status_code": r.status_code, "error": r.text}
+    except Exception as e:
+        return {"ok": False, "error": repr(e)}
+
+def auto_close_worker() -> None:
+    while True:
+        try:
+            if AUTO_CLOSE_ENABLED and broker_can_close():
+                now = now_utc()
+                for order_id, meta in list(_open_trade_meta.items()):
+                    opened_at = meta.get("opened_at_dt")
+                    if opened_at is None:
+                        continue
+
+                    age_minutes = (now - opened_at).total_seconds() / 60.0
+                    if age_minutes < MAX_HOLD_MINUTES:
+                        continue
+
+                    close_result = close_oanda_trade(order_id, int(meta["units_signed"]))
+                    if not close_result.get("ok"):
+                        continue
+
+                    row = {
+                        "instrument": meta["instrument"],
+                        "side": meta["side"],
+                        "units_signed": meta["units_signed"],
+                        "entry_price": meta["entry_price"],
+                        "sl_price": meta["sl_price"],
+                        "tp_price": meta["tp_price"],
+                        "status": "MANUAL",
+                        "pnl": None,
+                        "order_id": order_id,
+                        "reason": f"Max hold time reached ({MAX_HOLD_MINUTES}m)",
+                        "pair_score": meta.get("pair_score"),
+                        "ts": utc_ts(),
+                    }
+                    write_trade_row(row)
+                    note_trade_closed(order_id)
+                    _open_trade_meta.pop(order_id, None)
+        except Exception:
+            pass
+
+        time.sleep(AUTO_CLOSE_CHECK_SECONDS)
+
+# ====================================================
+# APP
+# ====================================================
+app = FastAPI(title="FX Sniper Per Pair", version="7.0-autoclose-db")
 
 @app.on_event("startup")
 def _startup() -> None:
+    init_db()
     seed_history_from_csv(DATA_DIR)
+    if AUTO_CLOSE_ENABLED:
+        t = threading.Thread(target=auto_close_worker, daemon=True)
+        t.start()
 
+# ====================================================
+# PREDICT
+# ====================================================
 def build_response_base(
     p: TVPayload,
     pair: str,
@@ -884,100 +1035,6 @@ def predict(p: TVPayload):
     conf_gate = float(gate["conf"])
     margin_gate = float(gate["margin"])
 
-    if p.force_decision in ("BUY", "SELL"):
-        side = p.force_decision
-        fingerprint = make_signal_fingerprint(instrument, side, p.t, float(p.mid_c), p.tf)
-        base = build_response_base(
-            p,
-            instrument,
-            instrument,
-            model_version,
-            avg_auc,
-            pair_score,
-            equity_used,
-            hint_side,
-            conf=1.0,
-            side_prob=1.0,
-            p_up=(1.0 if side == "BUY" else 0.0),
-            margin=1.0,
-        )
-
-        if is_duplicate_signal(pair6, fingerprint):
-            out = make_out(
-                decision="NONE",
-                why=f"Duplicate signal blocked for {instrument}",
-                would_order=False,
-                units=None,
-                units_signed=None,
-                sl_pips=None,
-                tp_pips=None,
-                sl_price=None,
-                tp_price=None,
-                **base,
-            )
-            write_audit_row(out)
-            return out
-
-        if trades_today_total() >= MAX_TRADES_PER_DAY_TOTAL or trades_today(pair6) >= MAX_TRADES_PER_DAY_PER_PAIR:
-            out = make_out(
-                decision="NONE",
-                why=f"Daily lock: max trades reached ({instrument})",
-                would_order=False,
-                units=None,
-                units_signed=None,
-                sl_pips=None,
-                tp_pips=None,
-                sl_price=None,
-                tp_price=None,
-                **base,
-            )
-            write_audit_row(out)
-            return out
-
-        if not can_open_trade():
-            out = make_out(
-                decision="NONE",
-                why=f"Open trade cap reached ({MAX_OPEN_TRADES})",
-                would_order=False,
-                units=None,
-                units_signed=None,
-                sl_pips=None,
-                tp_pips=None,
-                sl_price=None,
-                tp_price=None,
-                **base,
-            )
-            write_audit_row(out)
-            return out
-
-        sl_pips, tp_pips, sl_price, tp_price = compute_sl_tp_prices(
-            side,
-            float(p.mid_c),
-            float(p.atr14),
-            instrument,
-            b["labeling"]["sl_atr"],
-            b["labeling"]["tp_atr"],
-        )
-        units_abs = compute_units_dynamic(instrument, sl_pips, avg_auc, pair_score, equity_used, p.force_units_abs)
-        units_signed = units_abs if side == "BUY" else -units_abs
-
-        out = make_out(
-            decision=side,
-            why="FORCED decision (bypassed model/gates)",
-            would_order=True,
-            units=units_abs,
-            units_signed=units_signed,
-            sl_pips=sl_pips,
-            tp_pips=tp_pips,
-            sl_price=sl_price,
-            tp_price=tp_price,
-            **base,
-        )
-        remember_signal(pair6, fingerprint)
-        inc_trade(pair6)
-        write_audit_row(out)
-        return out
-
     try:
         feat_order = b["feature_order"]
         feature_row = build_runtime_feature_row(payload, pair6, instrument, feat_order)
@@ -1004,52 +1061,20 @@ def predict(p: TVPayload):
         margin = float(abs(p_up - 0.5) * 2.0)
 
         base = build_response_base(
-            p,
-            instrument,
-            instrument,
-            model_version,
-            avg_auc,
-            pair_score,
-            equity_used,
-            hint_side,
-            conf=conf,
-            side_prob=side_prob,
-            p_up=p_up,
-            margin=margin,
+            p, instrument, instrument, model_version, avg_auc, pair_score,
+            equity_used, hint_side, conf=conf, side_prob=side_prob, p_up=p_up, margin=margin
         )
 
         disagree_conf_gate = PAIR_DISAGREE_CONF.get(instrument, DEFAULT_DISAGREE_CONF)
         hint_disagrees = hint_side in ("BUY", "SELL") and side != hint_side
 
         if hint_disagrees and conf < disagree_conf_gate:
-            out = make_out(
-                decision="NONE",
-                why=f"Blocked disagreement: ML {side} vs hint {hint_side} (conf {conf:.2f} < {disagree_conf_gate:.2f})",
-                would_order=False,
-                units=None,
-                units_signed=None,
-                sl_pips=None,
-                tp_pips=None,
-                sl_price=None,
-                tp_price=None,
-                **base,
-            )
+            out = make_out(decision="NONE", why=f"Blocked disagreement: ML {side} vs hint {hint_side} (conf {conf:.2f} < {disagree_conf_gate:.2f})", would_order=False, units=None, units_signed=None, sl_pips=None, tp_pips=None, sl_price=None, tp_price=None, **base)
             write_audit_row(out)
             return out
 
         if pair_score < MIN_PAIR_SCORE_TO_TRADE:
-            out = make_out(
-                decision="NONE",
-                why=f"Pair blocked: {instrument} score {pair_score:.2f} < {MIN_PAIR_SCORE_TO_TRADE:.2f}",
-                would_order=False,
-                units=None,
-                units_signed=None,
-                sl_pips=None,
-                tp_pips=None,
-                sl_price=None,
-                tp_price=None,
-                **base,
-            )
+            out = make_out(decision="NONE", why=f"Pair blocked: {instrument} score {pair_score:.2f} < {MIN_PAIR_SCORE_TO_TRADE:.2f}", would_order=False, units=None, units_signed=None, sl_pips=None, tp_pips=None, sl_price=None, tp_price=None, **base)
             write_audit_row(out)
             return out
 
@@ -1057,66 +1082,22 @@ def predict(p: TVPayload):
         fingerprint = make_signal_fingerprint(instrument, side, p.t, float(p.mid_c), p.tf)
 
         if would_order and is_duplicate_signal(pair6, fingerprint):
-            out = make_out(
-                decision="NONE",
-                why=f"Duplicate signal blocked for {instrument}",
-                would_order=False,
-                units=None,
-                units_signed=None,
-                sl_pips=None,
-                tp_pips=None,
-                sl_price=None,
-                tp_price=None,
-                **base,
-            )
+            out = make_out(decision="NONE", why=f"Duplicate signal blocked for {instrument}", would_order=False, units=None, units_signed=None, sl_pips=None, tp_pips=None, sl_price=None, tp_price=None, **base)
             write_audit_row(out)
             return out
 
         if would_order and trades_today_total() >= MAX_TRADES_PER_DAY_TOTAL:
-            out = make_out(
-                decision="NONE",
-                why=f"Daily lock: total max trades reached ({MAX_TRADES_PER_DAY_TOTAL})",
-                would_order=False,
-                units=None,
-                units_signed=None,
-                sl_pips=None,
-                tp_pips=None,
-                sl_price=None,
-                tp_price=None,
-                **base,
-            )
+            out = make_out(decision="NONE", why=f"Daily lock: total max trades reached ({MAX_TRADES_PER_DAY_TOTAL})", would_order=False, units=None, units_signed=None, sl_pips=None, tp_pips=None, sl_price=None, tp_price=None, **base)
             write_audit_row(out)
             return out
 
         if would_order and trades_today(pair6) >= MAX_TRADES_PER_DAY_PER_PAIR:
-            out = make_out(
-                decision="NONE",
-                why=f"Daily lock: max trades for {instrument} reached",
-                would_order=False,
-                units=None,
-                units_signed=None,
-                sl_pips=None,
-                tp_pips=None,
-                sl_price=None,
-                tp_price=None,
-                **base,
-            )
+            out = make_out(decision="NONE", why=f"Daily lock: max trades for {instrument} reached", would_order=False, units=None, units_signed=None, sl_pips=None, tp_pips=None, sl_price=None, tp_price=None, **base)
             write_audit_row(out)
             return out
 
         if would_order and not can_open_trade():
-            out = make_out(
-                decision="NONE",
-                why=f"Open trade cap reached ({MAX_OPEN_TRADES})",
-                would_order=False,
-                units=None,
-                units_signed=None,
-                sl_pips=None,
-                tp_pips=None,
-                sl_price=None,
-                tp_price=None,
-                **base,
-            )
+            out = make_out(decision="NONE", why=f"Open trade cap reached ({MAX_OPEN_TRADES})", would_order=False, units=None, units_signed=None, sl_pips=None, tp_pips=None, sl_price=None, tp_price=None, **base)
             write_audit_row(out)
             return out
 
@@ -1126,12 +1107,8 @@ def predict(p: TVPayload):
 
         if would_order:
             sl_pips, tp_pips, sl_price, tp_price = compute_sl_tp_prices(
-                side,
-                float(p.mid_c),
-                float(p.atr14),
-                instrument,
-                b["labeling"]["sl_atr"],
-                b["labeling"]["tp_atr"],
+                side, float(p.mid_c), float(p.atr14), instrument,
+                b["labeling"]["sl_atr"], b["labeling"]["tp_atr"]
             )
             units_abs = compute_units_dynamic(instrument, sl_pips, avg_auc, pair_score, equity_used, p.force_units_abs)
             units_signed = units_abs if side == "BUY" else -units_abs
@@ -1174,6 +1151,48 @@ def predict(p: TVPayload):
         write_audit_row(out)
         return out
 
+# ====================================================
+# TRADE EVENT
+# ====================================================
+@app.post("/trade_event")
+def trade_event(t: TradeEvent):
+    row = t.model_dump()
+    if not row.get("ts"):
+        row["ts"] = utc_ts()
+
+    write_trade_row(row)
+
+    if t.status == "OPEN":
+        note_trade_opened(t.order_id)
+        opened_at_dt = dt.datetime.now(dt.timezone.utc)
+        if row.get("ts"):
+            try:
+                opened_at_dt = pd.to_datetime(row["ts"], utc=True).to_pydatetime()
+            except Exception:
+                pass
+
+        if t.order_id:
+            _open_trade_meta[str(t.order_id)] = {
+                "instrument": t.instrument,
+                "side": t.side,
+                "units_signed": t.units_signed,
+                "entry_price": t.entry_price,
+                "sl_price": t.sl_price,
+                "tp_price": t.tp_price,
+                "pair_score": t.pair_score,
+                "opened_at_dt": opened_at_dt,
+            }
+
+    if t.status in ("CLOSED", "STOPPED", "TAKE_PROFIT", "MANUAL"):
+        note_trade_closed(t.order_id)
+        if t.order_id:
+            _open_trade_meta.pop(str(t.order_id), None)
+
+    return {"ok": True, "open_trades": current_open_trade_count(), "status": t.status, "order_id": t.order_id}
+
+# ====================================================
+# STATS / EXPORT
+# ====================================================
 @app.get("/health")
 def health():
     return {
@@ -1181,16 +1200,9 @@ def health():
         "ts": utc_ts(),
         "pairs_loaded": len(BUNDLES),
         "pairs": sorted([pair_to_instrument(p) for p in BUNDLES.keys()]),
-        "dup_window_seconds": DUP_WINDOW_SECONDS,
-        "max_spread_pips": MAX_SPREAD_PIPS,
-        "units_jpy": UNITS_JPY,
-        "units_non_jpy": UNITS_NON_JPY,
-        "max_open_trades": MAX_OPEN_TRADES,
-        "default_disagree_conf": DEFAULT_DISAGREE_CONF,
-        "use_equity_sizing": USE_EQUITY_SIZING,
-        "default_equity": DEFAULT_EQUITY,
-        "risk_pct": RISK_PCT,
-        "min_pair_score_to_trade": MIN_PAIR_SCORE_TO_TRADE,
+        "db_path": DB_PATH,
+        "auto_close_enabled": AUTO_CLOSE_ENABLED,
+        "max_hold_minutes": MAX_HOLD_MINUTES,
         "current_open_trades": current_open_trade_count(),
     }
 
@@ -1198,19 +1210,11 @@ def health():
 def stats():
     df = read_audit_df()
     if df.empty:
-        return {
-            "ok": True,
-            "rows": 0,
-            "would_order_count": 0,
-            "decision_counts": {},
-            "pair_counts": {},
-            "last_ts": None,
-        }
+        return {"ok": True, "rows": 0, "would_order_count": 0, "decision_counts": {}, "pair_counts": {}, "last_ts": None}
 
     decision_counts = df["decision"].value_counts(dropna=False).to_dict() if "decision" in df.columns else {}
     pair_counts = df["instrument"].value_counts(dropna=False).to_dict() if "instrument" in df.columns else {}
     would_count = int(safe_bool_series(df, "would_order").sum())
-
     last_ts = None
     if "ts" in df.columns and not df["ts"].dropna().empty:
         last_ts = df["ts"].dropna().max().isoformat()
@@ -1228,31 +1232,11 @@ def stats():
 def pnl_stats():
     df = read_trades_df()
     if df.empty:
-        return {
-            "ok": True,
-            "trades": 0,
-            "closed_trades": 0,
-            "wins": 0,
-            "losses": 0,
-            "win_rate": None,
-            "net_pnl": 0.0,
-            "avg_pnl": None,
-            "open_trades": current_open_trade_count(),
-        }
+        return {"ok": True, "trades": 0, "closed_trades": 0, "wins": 0, "losses": 0, "win_rate": None, "net_pnl": 0.0, "avg_pnl": None, "open_trades": current_open_trade_count()}
 
     closed = df[df["status"].isin(["CLOSED", "STOPPED", "TAKE_PROFIT", "MANUAL"])].copy()
     if closed.empty or "pnl" not in closed.columns:
-        return {
-            "ok": True,
-            "trades": int(len(df)),
-            "closed_trades": int(len(closed)),
-            "wins": 0,
-            "losses": 0,
-            "win_rate": None,
-            "net_pnl": 0.0,
-            "avg_pnl": None,
-            "open_trades": current_open_trade_count(),
-        }
+        return {"ok": True, "trades": int(len(df)), "closed_trades": int(len(closed)), "wins": 0, "losses": 0, "win_rate": None, "net_pnl": 0.0, "avg_pnl": None, "open_trades": current_open_trade_count()}
 
     pnl = pd.to_numeric(closed["pnl"], errors="coerce").fillna(0.0)
     wins = int((pnl > 0).sum())
@@ -1280,7 +1264,6 @@ def pair_stats():
 
     df["pnl"] = pd.to_numeric(df.get("pnl"), errors="coerce").fillna(0.0)
     rows = []
-
     for instrument, sub in df.groupby("instrument"):
         n = int(len(sub))
         wins = int((sub["pnl"] > 0).sum())
@@ -1288,11 +1271,9 @@ def pair_stats():
         win_rate = wins / n if n else None
         net_pnl = float(sub["pnl"].sum())
         avg_pnl = float(sub["pnl"].mean()) if n else None
-
         pair6 = instrument.replace("_", "")
         avg_auc = safe_float(BUNDLES.get(pair6, {}).get("avg_auc"), 0.0)
         pair_score = compute_pair_score(instrument, avg_auc)
-
         rows.append({
             "instrument": instrument,
             "trades": n,
@@ -1305,41 +1286,45 @@ def pair_stats():
             "pair_score": pair_score,
             "is_tradeable": pair_score >= MIN_PAIR_SCORE_TO_TRADE,
         })
-
     rows = sorted(rows, key=lambda x: (x["pair_score"], x["net_pnl"]), reverse=True)
     return {"ok": True, "pairs": rows}
 
-@app.get("/weak_pairs")
-def weak_pairs():
-    df = read_closed_trades_df()
+@app.get("/export/closed_trades.xlsx")
+def export_closed_trades_xlsx():
+    df = read_closed_trades_df().copy()
+    out_path = os.path.join(LOG_DIR, "closed_trades_export.xlsx")
+
     if df.empty:
-        return {"ok": True, "weak_pairs": []}
+        blank = pd.DataFrame(columns=["ts", "instrument", "side", "units_signed", "entry_price", "sl_price", "tp_price", "status", "pnl", "order_id", "reason", "pair_score"])
+        with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
+            blank.to_excel(writer, index=False, sheet_name="closed_trades")
+        return FileResponse(out_path, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", filename="closed_trades_export.xlsx")
 
     df["pnl"] = pd.to_numeric(df.get("pnl"), errors="coerce").fillna(0.0)
-    weak = []
+    summary = pd.DataFrame([{
+        "closed_trades": int(len(df)),
+        "wins": int((df["pnl"] > 0).sum()),
+        "losses": int((df["pnl"] < 0).sum()),
+        "win_rate": float((df["pnl"] > 0).sum() / len(df)) if len(df) else None,
+        "net_pnl": float(df["pnl"].sum()),
+        "avg_pnl": float(df["pnl"].mean()) if len(df) else None,
+    }])
 
-    for instrument, sub in df.groupby("instrument"):
-        n = int(len(sub))
-        if n < MIN_TRADES_FOR_PAIR_SCORING:
-            continue
+    by_pair = df.groupby("instrument", dropna=False).agg(
+        trades=("instrument", "count"),
+        wins=("pnl", lambda s: int((pd.to_numeric(s, errors="coerce").fillna(0.0) > 0).sum())),
+        losses=("pnl", lambda s: int((pd.to_numeric(s, errors="coerce").fillna(0.0) < 0).sum())),
+        net_pnl=("pnl", lambda s: float(pd.to_numeric(s, errors="coerce").fillna(0.0).sum())),
+        avg_pnl=("pnl", lambda s: float(pd.to_numeric(s, errors="coerce").fillna(0.0).mean())),
+    ).reset_index()
+    by_pair["win_rate"] = by_pair["wins"] / by_pair["trades"]
 
-        wins = int((sub["pnl"] > 0).sum())
-        win_rate = wins / n if n else 0.0
-        pair6 = instrument.replace("_", "")
-        avg_auc = safe_float(BUNDLES.get(pair6, {}).get("avg_auc"), 0.0)
-        pair_score = compute_pair_score(instrument, avg_auc)
+    with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="closed_trades")
+        summary.to_excel(writer, index=False, sheet_name="summary")
+        by_pair.to_excel(writer, index=False, sheet_name="by_pair")
 
-        if pair_score < MIN_PAIR_SCORE_TO_TRADE:
-            weak.append({
-                "instrument": instrument,
-                "trades": n,
-                "win_rate": win_rate,
-                "avg_auc": avg_auc,
-                "pair_score": pair_score,
-            })
-
-    weak = sorted(weak, key=lambda x: x["pair_score"])
-    return {"ok": True, "weak_pairs": weak}
+    return FileResponse(out_path, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", filename="closed_trades_export.xlsx")
 
 @app.get("/dashboard")
 def dashboard():
@@ -1357,30 +1342,24 @@ def dashboard():
     else:
         latest_rows = pd.DataFrame()
 
-    cols = [
-        c for c in [
-            "ts", "instrument", "symbol", "hint_side", "decision", "confidence",
-            "side_prob", "p_up", "margin", "pair_score", "equity_used",
-            "units_signed", "sl_price", "tp_price", "would_order", "why",
-        ] if c in latest_rows.columns
-    ]
-
+    cols = [c for c in ["ts", "instrument", "symbol", "hint_side", "decision", "confidence", "side_prob", "p_up", "margin", "pair_score", "equity_used", "units_signed", "sl_price", "tp_price", "would_order", "why"] if c in latest_rows.columns]
     table_html = latest_rows[cols].to_html(index=False, escape=False) if not latest_rows.empty else "<p>No audit data yet.</p>"
 
     by_pair_html = "<p>No audit data yet.</p>"
     if not audit_df.empty and "instrument" in audit_df.columns:
-        by_pair = (
-            audit_df["instrument"]
-            .value_counts()
-            .rename_axis("instrument")
-            .reset_index(name="count")
-        )
+        by_pair = audit_df["instrument"].value_counts().rename_axis("instrument").reset_index(name="count")
         by_pair_html = by_pair.to_html(index=False)
 
     pnl_html = "<p>No trade data yet.</p>"
     if not trades_df.empty:
         pnl_cols = [c for c in ["ts", "instrument", "side", "units_signed", "status", "pnl", "reason", "order_id"] if c in trades_df.columns]
         pnl_html = trades_df.sort_values("ts", ascending=False).head(50)[pnl_cols].to_html(index=False, escape=False)
+
+    closed = read_closed_trades_df()
+    win_rate_txt = "N/A"
+    if not closed.empty and "pnl" in closed.columns:
+        pnl = pd.to_numeric(closed["pnl"], errors="coerce").fillna(0.0)
+        win_rate_txt = f"{((pnl > 0).sum() / len(closed)):.2%}"
 
     html = f"""
     <html>
@@ -1390,34 +1369,17 @@ def dashboard():
       </head>
       <body style="font-family: Arial; padding: 24px;">
         <h1>FX Sniper Dashboard</h1>
-
         <div style="display:flex; gap:24px; margin-bottom:24px; flex-wrap:wrap;">
-          <div style="padding:16px; border:1px solid #ccc; border-radius:8px;">
-            <h3>Total predictions</h3>
-            <div style="font-size:28px;">{total_rows}</div>
-          </div>
-          <div style="padding:16px; border:1px solid #ccc; border-radius:8px;">
-            <h3>Would order</h3>
-            <div style="font-size:28px;">{would_count}</div>
-          </div>
-          <div style="padding:16px; border:1px solid #ccc; border-radius:8px;">
-            <h3>Blocked / NONE</h3>
-            <div style="font-size:28px;">{none_count}</div>
-          </div>
-          <div style="padding:16px; border:1px solid #ccc; border-radius:8px;">
-            <h3>Open trades tracked</h3>
-            <div style="font-size:28px;">{current_open_trade_count()}</div>
-          </div>
+          <div style="padding:16px; border:1px solid #ccc; border-radius:8px;"><h3>Total predictions</h3><div style="font-size:28px;">{total_rows}</div></div>
+          <div style="padding:16px; border:1px solid #ccc; border-radius:8px;"><h3>Would order</h3><div style="font-size:28px;">{would_count}</div></div>
+          <div style="padding:16px; border:1px solid #ccc; border-radius:8px;"><h3>Blocked / NONE</h3><div style="font-size:28px;">{none_count}</div></div>
+          <div style="padding:16px; border:1px solid #ccc; border-radius:8px;"><h3>Open trades tracked</h3><div style="font-size:28px;">{current_open_trade_count()}</div></div>
+          <div style="padding:16px; border:1px solid #ccc; border-radius:8px;"><h3>Win rate</h3><div style="font-size:28px;">{win_rate_txt}</div></div>
         </div>
 
-        <h2>By pair</h2>
-        {by_pair_html}
-
-        <h2>Latest predictions</h2>
-        {table_html}
-
-        <h2>Latest trade events</h2>
-        {pnl_html}
+        <h2>By pair</h2>{by_pair_html}
+        <h2>Latest predictions</h2>{table_html}
+        <h2>Latest trade events</h2>{pnl_html}
 
         <p style="margin-top:24px;">
           JSON endpoints:
@@ -1425,29 +1387,9 @@ def dashboard():
           <a href="/stats">/stats</a> |
           <a href="/pnl_stats">/pnl_stats</a> |
           <a href="/pair_stats">/pair_stats</a> |
-          <a href="/weak_pairs">/weak_pairs</a>
+          <a href="/export/closed_trades.xlsx">/export/closed_trades.xlsx</a>
         </p>
       </body>
     </html>
     """
     return HTMLResponse(content=html)
-
-@app.post("/trade_event")
-def trade_event(t: TradeEvent):
-    row = t.model_dump()
-    if not row.get("ts"):
-        row["ts"] = utc_ts()
-
-    write_trade_row(row)
-
-    if t.status == "OPEN":
-        note_trade_opened(t.order_id)
-    if t.status in ("CLOSED", "STOPPED", "TAKE_PROFIT", "MANUAL"):
-        note_trade_closed(t.order_id)
-
-    return {
-        "ok": True,
-        "open_trades": current_open_trade_count(),
-        "status": t.status,
-        "order_id": t.order_id,
-    }

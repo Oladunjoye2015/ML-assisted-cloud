@@ -6,3 +6,5 @@ scikit-learn==1.6.1
 numpy==2.2.4
 lightgbm==4.6.0
 catboost
+openpyxl
+requests
