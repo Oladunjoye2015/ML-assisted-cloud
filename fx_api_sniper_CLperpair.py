@@ -30,10 +30,11 @@ TRADES_CSV = os.path.join(LOG_DIR, "trades.csv")
 MAX_HOLD_MINUTES = int(os.getenv("MAX_HOLD_MINUTES", "60"))
 AUTO_CLOSE_ENABLED = os.getenv("AUTO_CLOSE_ENABLED", "true").lower() == "true"
 AUTO_CLOSE_CHECK_SECONDS = int(os.getenv("AUTO_CLOSE_CHECK_SECONDS", "1800"))
+AUTO_CLOSE_ALLOW_POSITION_FALLBACK = os.getenv("AUTO_CLOSE_ALLOW_POSITION_FALLBACK", "false").lower() == "true"
 
 OANDA_TOKEN = os.getenv("OANDA_TOKEN", "").strip()
 OANDA_ACCOUNT_ID = os.getenv("OANDA_ACCOUNT_ID", "").strip()
-OANDA_BASE_URL = os.getenv("OANDA_BASE_URL", "https://api-fxtrade.oanda.com").strip()
+OANDA_BASE_URL = os.getenv("OANDA_BASE_URL", "https://api-fxtrade.oanda.com").strip().rstrip("/")
 
 DEFAULT_GATE = {"conf": float(os.getenv("CONF_GATE", "0.54")), "margin": float(os.getenv("MARGIN_GATE", "0.04"))}
 
@@ -153,6 +154,9 @@ def normalize_pair(symbol: str) -> Optional[str]:
 def pair_to_instrument(pair6: str) -> str:
     return PAIR_MAP[pair6]
 
+def instrument_to_symbol(instrument: str) -> str:
+    return INSTRUMENT_TO_PAIR6.get(str(instrument).upper(), str(instrument).replace("_", ""))
+
 def instrument_is_jpy(instrument: str) -> bool:
     return instrument in JPY_INSTRUMENTS
 
@@ -203,6 +207,27 @@ def infer_session_code(ts_utc: dt.datetime) -> int:
     if 13 <= h < 22:
         return 2
     return 3
+
+def normalize_side(side: Any) -> str:
+    s = str(side or "").strip().upper()
+    if s in ("BUY", "LONG"):
+        return "BUY"
+    if s in ("SELL", "SHORT"):
+        return "SELL"
+    return s
+
+def make_tracking_key(
+    order_id: Optional[str],
+    broker_trade_id: Optional[str],
+    client_trade_id: Optional[str],
+    instrument: str,
+    side: str,
+    ts: Optional[str],
+) -> str:
+    for candidate in (broker_trade_id, client_trade_id, order_id):
+        if candidate not in (None, ""):
+            return str(candidate)
+    return f"{instrument}:{side}:{ts or utc_ts()}"
 
 # ====================================================
 # SQLITE
@@ -349,13 +374,33 @@ def current_open_trade_count() -> int:
 def can_open_trade() -> bool:
     return current_open_trade_count() < MAX_OPEN_TRADES
 
-def note_trade_opened(order_id: Optional[str]) -> None:
-    if order_id:
-        _open_trade_ids.add(order_id)
+def note_trade_opened(tracking_key: Optional[str]) -> None:
+    if tracking_key:
+        _open_trade_ids.add(str(tracking_key))
 
-def note_trade_closed(order_id: Optional[str]) -> None:
-    if order_id and order_id in _open_trade_ids:
-        _open_trade_ids.remove(order_id)
+def note_trade_closed(tracking_key: Optional[str]) -> None:
+    if tracking_key and str(tracking_key) in _open_trade_ids:
+        _open_trade_ids.remove(str(tracking_key))
+
+def tracking_keys_for_close_event(t: "TradeEvent") -> List[str]:
+    keys: List[str] = []
+    for candidate in (t.broker_trade_id, t.client_trade_id, t.order_id):
+        if candidate not in (None, ""):
+            keys.append(str(candidate))
+    for tracking_key, meta in _open_trade_meta.items():
+        if str(meta.get("order_id", "")) and str(meta.get("order_id")) == str(t.order_id):
+            keys.append(tracking_key)
+        if str(meta.get("broker_trade_id", "")) and str(meta.get("broker_trade_id")) == str(t.broker_trade_id):
+            keys.append(tracking_key)
+        if str(meta.get("client_trade_id", "")) and str(meta.get("client_trade_id")) == str(t.client_trade_id):
+            keys.append(tracking_key)
+    seen = set()
+    deduped = []
+    for k in keys:
+        if k not in seen:
+            seen.add(k)
+            deduped.append(k)
+    return deduped
 
 # ====================================================
 # SIGNAL DUP CHECK
@@ -833,46 +878,162 @@ class TradeEvent(BaseModel):
     reason: Optional[str] = None
     pair_score: Optional[float] = None
     ts: Optional[str] = None
+    symbol: Optional[str] = None
+    broker_trade_id: Optional[str] = None
+    broker_order_id: Optional[str] = None
+    client_trade_id: Optional[str] = None
 
 def make_out(**kwargs) -> Dict[str, Any]:
     return kwargs
 
 # ====================================================
-# AUTO CLOSE
+# OANDA HELPERS
 # ====================================================
 def broker_can_close() -> bool:
     return bool(OANDA_TOKEN and OANDA_ACCOUNT_ID and OANDA_BASE_URL)
 
-def close_oanda_trade(order_id: str, units_signed: int) -> Dict[str, Any]:
-    if not broker_can_close():
-        return {"ok": False, "error": "Missing OANDA env vars"}
-
-    trade_specifier = str(order_id)
-    url = f"{OANDA_BASE_URL}/v3/accounts/{OANDA_ACCOUNT_ID}/trades/{trade_specifier}/close"
-    headers = {
+def oanda_headers() -> Dict[str, str]:
+    return {
         "Authorization": f"Bearer {OANDA_TOKEN}",
         "Content-Type": "application/json",
     }
-    payload = {"longUnits": "ALL"} if units_signed > 0 else {"shortUnits": "ALL"}
 
+def oanda_request(method: str, path: str, json_body: Optional[Dict[str, Any]] = None, timeout: int = 20) -> Dict[str, Any]:
+    if not broker_can_close():
+        return {"ok": False, "error": "Missing OANDA env vars"}
+
+    url = f"{OANDA_BASE_URL}{path}"
     try:
-        r = requests.put(url, headers=headers, json=payload, timeout=20)
+        r = requests.request(method=method.upper(), url=url, headers=oanda_headers(), json=json_body, timeout=timeout)
         try:
             body = r.json()
         except Exception:
             body = r.text
-
         if r.status_code in (200, 201):
-            return {"ok": True, "data": body}
-
-        return {
-            "ok": False,
-            "status_code": r.status_code,
-            "error": body,
-        }
+            return {"ok": True, "status_code": r.status_code, "data": body}
+        return {"ok": False, "status_code": r.status_code, "error": body}
     except Exception as e:
         return {"ok": False, "error": repr(e)}
 
+def get_oanda_position(instrument: str) -> Dict[str, Any]:
+    return oanda_request("GET", f"/v3/accounts/{OANDA_ACCOUNT_ID}/positions/{instrument}")
+
+def get_position_side_trade_ids(instrument: str, side: str) -> Dict[str, Any]:
+    side = normalize_side(side)
+    res = get_oanda_position(instrument)
+    if not res.get("ok"):
+        return res
+
+    body = res.get("data") or {}
+    position = body.get("position") or {}
+    branch = position.get("long") if side == "BUY" else position.get("short")
+    trade_ids = []
+    units = "0"
+    if isinstance(branch, dict):
+        trade_ids = [str(x) for x in (branch.get("tradeIDs") or []) if str(x).strip()]
+        units = str(branch.get("units", "0"))
+    return {
+        "ok": True,
+        "status_code": res.get("status_code"),
+        "trade_ids": trade_ids,
+        "units": units,
+        "data": body,
+    }
+
+def close_oanda_trade_by_specifier(trade_specifier: str) -> Dict[str, Any]:
+    if not trade_specifier:
+        return {"ok": False, "error": "Missing trade_specifier"}
+    return oanda_request(
+        "PUT",
+        f"/v3/accounts/{OANDA_ACCOUNT_ID}/trades/{trade_specifier}/close",
+        json_body={"units": "ALL"},
+    )
+
+def close_oanda_position_side(instrument: str, side: str) -> Dict[str, Any]:
+    side = normalize_side(side)
+    payload = {"longUnits": "NONE", "shortUnits": "NONE"}
+    if side == "BUY":
+        payload["longUnits"] = "ALL"
+    elif side == "SELL":
+        payload["shortUnits"] = "ALL"
+    else:
+        return {"ok": False, "error": f"Unsupported side for position close: {side}"}
+
+    return oanda_request(
+        "PUT",
+        f"/v3/accounts/{OANDA_ACCOUNT_ID}/positions/{instrument}/close",
+        json_body=payload,
+    )
+
+def tracked_open_count_for_instrument_side(instrument: str, side: str) -> int:
+    side = normalize_side(side)
+    count = 0
+    for meta in _open_trade_meta.values():
+        if meta.get("instrument") == instrument and normalize_side(meta.get("side")) == side:
+            count += 1
+    return count
+
+def close_open_trade_meta(meta: Dict[str, Any]) -> Dict[str, Any]:
+    instrument = str(meta.get("instrument", "")).upper()
+    side = normalize_side(meta.get("side"))
+    broker_trade_id = str(meta.get("broker_trade_id") or "").strip()
+    client_trade_id = str(meta.get("client_trade_id") or "").strip()
+
+    attempts: List[Dict[str, Any]] = []
+
+    if broker_trade_id:
+        res = close_oanda_trade_by_specifier(broker_trade_id)
+        attempts.append({"method": "trade_id", "specifier": broker_trade_id, "result": res})
+        if res.get("ok"):
+            return {"ok": True, "method": "trade_id", "specifier": broker_trade_id, "data": res.get("data"), "attempts": attempts}
+
+    if client_trade_id:
+        spec = client_trade_id if client_trade_id.startswith("@") else f"@{client_trade_id}"
+        res = close_oanda_trade_by_specifier(spec)
+        attempts.append({"method": "client_trade_id", "specifier": spec, "result": res})
+        if res.get("ok"):
+            return {"ok": True, "method": "client_trade_id", "specifier": spec, "data": res.get("data"), "attempts": attempts}
+
+    position_res = get_position_side_trade_ids(instrument, side)
+    attempts.append({"method": "inspect_position", "instrument": instrument, "side": side, "result": position_res})
+
+    if position_res.get("ok"):
+        trade_ids = position_res.get("trade_ids") or []
+        if len(trade_ids) == 1:
+            spec = str(trade_ids[0])
+            res = close_oanda_trade_by_specifier(spec)
+            attempts.append({"method": "single_trade_from_position", "specifier": spec, "result": res})
+            if res.get("ok"):
+                return {"ok": True, "method": "single_trade_from_position", "specifier": spec, "data": res.get("data"), "attempts": attempts}
+
+        if len(trade_ids) == 0:
+            return {
+                "ok": False,
+                "error": "No open trade found on broker for instrument/side",
+                "attempts": attempts,
+            }
+
+        if len(trade_ids) > 1:
+            if AUTO_CLOSE_ALLOW_POSITION_FALLBACK and tracked_open_count_for_instrument_side(instrument, side) == 1:
+                res = close_oanda_position_side(instrument, side)
+                attempts.append({"method": "position_side_close", "instrument": instrument, "side": side, "result": res})
+                if res.get("ok"):
+                    return {"ok": True, "method": "position_side_close", "specifier": instrument, "data": res.get("data"), "attempts": attempts}
+            return {
+                "ok": False,
+                "error": f"Ambiguous broker state: {len(trade_ids)} open trades found for {instrument} {side}",
+                "attempts": attempts,
+            }
+
+    return {
+        "ok": False,
+        "error": "Could not close trade",
+        "attempts": attempts,
+    }
+
+# ====================================================
+# AUTO CLOSE
+# ====================================================
 def auto_close_worker() -> None:
     while True:
         try:
@@ -890,7 +1051,7 @@ def auto_close_worker() -> None:
 
             now = now_utc()
 
-            for order_id, meta in list(_open_trade_meta.items()):
+            for tracking_key, meta in list(_open_trade_meta.items()):
                 opened_at = meta.get("opened_at_dt")
                 if opened_at is None:
                     continue
@@ -899,14 +1060,14 @@ def auto_close_worker() -> None:
                 if age_minutes < MAX_HOLD_MINUTES:
                     continue
 
-                close_result = close_oanda_trade(order_id, int(meta["units_signed"]))
+                close_result = close_open_trade_meta(meta)
 
                 if not close_result.get("ok"):
                     write_audit_row({
                         "ts": utc_ts(),
-                        "pair": meta["instrument"].replace("_", ""),
+                        "pair": instrument_to_symbol(meta["instrument"]),
                         "instrument": meta["instrument"],
-                        "symbol": meta["instrument"].replace("_", ""),
+                        "symbol": instrument_to_symbol(meta["instrument"]),
                         "hint_side": meta["side"],
                         "model_version": "auto_close",
                         "avg_auc": None,
@@ -928,7 +1089,7 @@ def auto_close_worker() -> None:
                         "tp_pips": None,
                         "sl_price": meta["sl_price"],
                         "tp_price": meta["tp_price"],
-                        "why": f"AUTO_CLOSE_FAILED | order_id={order_id} | status_code={close_result.get('status_code')} | error={json.dumps(close_result.get('error', ''))[:1000]}",
+                        "why": f"AUTO_CLOSE_FAILED | tracking_key={tracking_key} | error={json.dumps(close_result, default=str)[:1500]}",
                     })
                     continue
 
@@ -941,14 +1102,14 @@ def auto_close_worker() -> None:
                     "tp_price": meta["tp_price"],
                     "status": "MANUAL",
                     "pnl": None,
-                    "order_id": order_id,
+                    "order_id": meta.get("order_id"),
                     "reason": f"Max hold time reached ({MAX_HOLD_MINUTES}m)",
                     "pair_score": meta.get("pair_score"),
                     "ts": utc_ts(),
                 }
                 write_trade_row(row)
-                note_trade_closed(order_id)
-                _open_trade_meta.pop(order_id, None)
+                note_trade_closed(tracking_key)
+                _open_trade_meta.pop(tracking_key, None)
 
         except Exception as e:
             write_audit_row({
@@ -985,7 +1146,7 @@ def auto_close_worker() -> None:
 # ====================================================
 # APP
 # ====================================================
-app = FastAPI(title="FX Sniper Per Pair", version="7.1-autoclose-db-fixed")
+app = FastAPI(title="FX Sniper Per Pair", version="7.2-autoclose-safe-position-fallback")
 
 @app.on_event("startup")
 def _startup() -> None:
@@ -1000,7 +1161,7 @@ def _startup() -> None:
 # ====================================================
 def build_response_base(
     p: TVPayload,
-    pair: str,
+    pair6: str,
     instrument: str,
     model_version: str,
     avg_auc: float,
@@ -1012,11 +1173,13 @@ def build_response_base(
     p_up: float = 0.0,
     margin: float = 0.0,
 ) -> Dict[str, Any]:
+    clean_symbol = pair6 or normalize_pair(p.symbol) or str(p.symbol).upper().replace("_", "")
     return {
         "ts": utc_ts(),
-        "pair": pair,
+        "pair": pair6,
         "instrument": instrument,
-        "symbol": p.symbol,
+        "symbol": clean_symbol,
+        "raw_symbol": p.symbol,
         "hint_side": hint_side,
         "model_version": model_version,
         "avg_auc": avg_auc,
@@ -1035,7 +1198,7 @@ def build_response_base(
 @app.post("/predict")
 def predict(p: TVPayload):
     pair6 = normalize_pair(p.symbol)
-    hint_side = str(getattr(p, "hint_side", "") or "").upper()
+    hint_side = normalize_side(getattr(p, "hint_side", "") or "")
     equity_used = get_equity_used(p)
 
     if pair6 is None or pair6 not in PAIR_MAP:
@@ -1084,7 +1247,7 @@ def predict(p: TVPayload):
             tp_pips=None,
             sl_price=None,
             tp_price=None,
-            **build_response_base(p, instrument, instrument, "", 0.0, None, equity_used, hint_side),
+            **build_response_base(p, pair6, instrument, "", 0.0, None, equity_used, hint_side),
         )
         write_audit_row(out)
         return out
@@ -1105,7 +1268,7 @@ def predict(p: TVPayload):
             tp_pips=None,
             sl_price=None,
             tp_price=None,
-            **build_response_base(p, instrument, instrument, model_version, avg_auc, pair_score, equity_used, hint_side),
+            **build_response_base(p, pair6, instrument, model_version, avg_auc, pair_score, equity_used, hint_side),
         )
         write_audit_row(out)
         return out
@@ -1124,6 +1287,9 @@ def predict(p: TVPayload):
         p_up = float(proba[1]) if len(proba) > 1 else float(proba[0])
 
         side = "BUY" if p_up >= 0.5 else "SELL"
+        if p.force_decision in ("BUY", "SELL"):
+            side = p.force_decision
+
         side_prob = p_up if side == "BUY" else (1.0 - p_up)
         conf = side_prob
 
@@ -1140,7 +1306,7 @@ def predict(p: TVPayload):
         margin = float(abs(p_up - 0.5) * 2.0)
 
         base = build_response_base(
-            p, instrument, instrument, model_version, avg_auc, pair_score,
+            p, pair6, instrument, model_version, avg_auc, pair_score,
             equity_used, hint_side, conf=conf, side_prob=side_prob, p_up=p_up, margin=margin
         )
 
@@ -1225,7 +1391,7 @@ def predict(p: TVPayload):
             tp_pips=None,
             sl_price=None,
             tp_price=None,
-            **build_response_base(p, instrument, instrument, model_version, avg_auc, pair_score, equity_used, hint_side),
+            **build_response_base(p, pair6, instrument, model_version, avg_auc, pair_score, equity_used, hint_side),
         )
         write_audit_row(out)
         return out
@@ -1239,10 +1405,30 @@ def trade_event(t: TradeEvent):
     if not row.get("ts"):
         row["ts"] = utc_ts()
 
-    write_trade_row(row)
+    t.instrument = str(t.instrument).upper()
+    t.side = normalize_side(t.side)
+    if not row.get("symbol"):
+        row["symbol"] = instrument_to_symbol(t.instrument)
+
+    write_trade_row({
+        "instrument": t.instrument,
+        "side": t.side,
+        "units_signed": t.units_signed,
+        "entry_price": t.entry_price,
+        "sl_price": t.sl_price,
+        "tp_price": t.tp_price,
+        "status": t.status,
+        "pnl": t.pnl,
+        "order_id": t.order_id,
+        "reason": t.reason,
+        "pair_score": t.pair_score,
+        "ts": row["ts"],
+    })
+
+    tracking_key = make_tracking_key(t.order_id, t.broker_trade_id, t.client_trade_id, t.instrument, t.side, row["ts"])
 
     if t.status == "OPEN":
-        note_trade_opened(t.order_id)
+        note_trade_opened(tracking_key)
         opened_at_dt = dt.datetime.now(dt.timezone.utc)
         if row.get("ts"):
             try:
@@ -1250,24 +1436,40 @@ def trade_event(t: TradeEvent):
             except Exception:
                 pass
 
-        if t.order_id:
-            _open_trade_meta[str(t.order_id)] = {
-                "instrument": t.instrument,
-                "side": t.side,
-                "units_signed": t.units_signed,
-                "entry_price": t.entry_price,
-                "sl_price": t.sl_price,
-                "tp_price": t.tp_price,
-                "pair_score": t.pair_score,
-                "opened_at_dt": opened_at_dt,
-            }
+        _open_trade_meta[str(tracking_key)] = {
+            "tracking_key": str(tracking_key),
+            "instrument": t.instrument,
+            "symbol": row["symbol"],
+            "side": t.side,
+            "units_signed": t.units_signed,
+            "entry_price": t.entry_price,
+            "sl_price": t.sl_price,
+            "tp_price": t.tp_price,
+            "pair_score": t.pair_score,
+            "opened_at_dt": opened_at_dt,
+            "order_id": t.order_id,
+            "broker_trade_id": t.broker_trade_id,
+            "broker_order_id": t.broker_order_id,
+            "client_trade_id": t.client_trade_id,
+            "ts": row["ts"],
+        }
 
     if t.status in ("CLOSED", "STOPPED", "TAKE_PROFIT", "MANUAL"):
-        note_trade_closed(t.order_id)
-        if t.order_id:
-            _open_trade_meta.pop(str(t.order_id), None)
+        keys = tracking_keys_for_close_event(t)
+        if not keys:
+            keys = [tracking_key]
+        for key in keys:
+            note_trade_closed(key)
+            _open_trade_meta.pop(str(key), None)
 
-    return {"ok": True, "open_trades": current_open_trade_count(), "status": t.status, "order_id": t.order_id}
+    return {
+        "ok": True,
+        "open_trades": current_open_trade_count(),
+        "status": t.status,
+        "order_id": t.order_id,
+        "tracking_key": tracking_key,
+        "broker_trade_id": t.broker_trade_id,
+    }
 
 # ====================================================
 # STATS / EXPORT
@@ -1283,6 +1485,7 @@ def health():
         "auto_close_enabled": AUTO_CLOSE_ENABLED,
         "max_hold_minutes": MAX_HOLD_MINUTES,
         "auto_close_check_seconds": AUTO_CLOSE_CHECK_SECONDS,
+        "auto_close_allow_position_fallback": AUTO_CLOSE_ALLOW_POSITION_FALLBACK,
         "current_open_trades": current_open_trade_count(),
     }
 
@@ -1351,7 +1554,7 @@ def pair_stats():
         win_rate = wins / n if n else None
         net_pnl = float(sub["pnl"].sum())
         avg_pnl = float(sub["pnl"].mean()) if n else None
-        pair6 = instrument.replace("_", "")
+        pair6 = instrument_to_symbol(instrument)
         avg_auc = safe_float(BUNDLES.get(pair6, {}).get("avg_auc"), 0.0)
         pair_score = compute_pair_score(instrument, avg_auc)
         rows.append({
@@ -1422,7 +1625,7 @@ def dashboard():
     else:
         latest_rows = pd.DataFrame()
 
-    cols = [c for c in ["ts", "instrument", "symbol", "hint_side", "decision", "confidence", "side_prob", "p_up", "margin", "pair_score", "equity_used", "units_signed", "sl_price", "tp_price", "would_order", "why"] if c in latest_rows.columns]
+    cols = [c for c in ["ts", "pair", "instrument", "symbol", "raw_symbol", "hint_side", "decision", "confidence", "side_prob", "p_up", "margin", "pair_score", "equity_used", "units_signed", "sl_price", "tp_price", "would_order", "why"] if c in latest_rows.columns]
     table_html = latest_rows[cols].to_html(index=False, escape=False) if not latest_rows.empty else "<p>No audit data yet.</p>"
 
     by_pair_html = "<p>No audit data yet.</p>"
