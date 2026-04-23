@@ -847,8 +847,8 @@ def close_oanda_trade(order_id: str, units_signed: int) -> Dict[str, Any]:
     if not broker_can_close():
         return {"ok": False, "error": "Missing OANDA env vars"}
 
-    trade_id = str(order_id)
-    url = f"{OANDA_BASE_URL}/v3/accounts/{OANDA_ACCOUNT_ID}/trades/{trade_id}/close"
+    trade_specifier = str(order_id)
+    url = f"{OANDA_BASE_URL}/v3/accounts/{OANDA_ACCOUNT_ID}/trades/{trade_specifier}/close"
     headers = {
         "Authorization": f"Bearer {OANDA_TOKEN}",
         "Content-Type": "application/json",
@@ -857,53 +857,21 @@ def close_oanda_trade(order_id: str, units_signed: int) -> Dict[str, Any]:
 
     try:
         r = requests.put(url, headers=headers, json=payload, timeout=20)
+        try:
+            body = r.json()
+        except Exception:
+            body = r.text
+
         if r.status_code in (200, 201):
-            return {"ok": True, "data": r.json()}
-        return {"ok": False, "status_code": r.status_code, "error": r.text}
+            return {"ok": True, "data": body}
+
+        return {
+            "ok": False,
+            "status_code": r.status_code,
+            "error": body,
+        }
     except Exception as e:
         return {"ok": False, "error": repr(e)}
-
-def auto_close_worker() -> None:
-    while True:
-        try:
-            if AUTO_CLOSE_ENABLED and broker_can_close():
-                now = now_utc()
-                for order_id, meta in list(_open_trade_meta.items()):
-                    opened_at = meta.get("opened_at_dt")
-                    if opened_at is None:
-                        continue
-
-                    age_minutes = (now - opened_at).total_seconds() / 60.0
-                    if age_minutes < MAX_HOLD_MINUTES:
-                        continue
-
-                    close_result = close_oanda_trade(order_id, int(meta["units_signed"]))
-                    if not close_result.get("ok"):
-                        continue
-
-                    row = {
-                        "instrument": meta["instrument"],
-                        "side": meta["side"],
-                        "units_signed": meta["units_signed"],
-                        "entry_price": meta["entry_price"],
-                        "sl_price": meta["sl_price"],
-                        "tp_price": meta["tp_price"],
-                        "status": "MANUAL",
-                        "pnl": None,
-                        "order_id": order_id,
-                        "reason": f"Max hold time reached ({MAX_HOLD_MINUTES}m)",
-                        "pair_score": meta.get("pair_score"),
-                        "ts": utc_ts(),
-                    }
-                    write_trade_row(row)
-                    note_trade_closed(order_id)
-                    _open_trade_meta.pop(order_id, None)
-        except Exception:
-            pass
-
-        time.sleep(AUTO_CLOSE_CHECK_SECONDS)
-
-
 
 def auto_close_worker() -> None:
     while True:
@@ -932,7 +900,36 @@ def auto_close_worker() -> None:
                     continue
 
                 close_result = close_oanda_trade(order_id, int(meta["units_signed"]))
+
                 if not close_result.get("ok"):
+                    write_audit_row({
+                        "ts": utc_ts(),
+                        "pair": meta["instrument"].replace("_", ""),
+                        "instrument": meta["instrument"],
+                        "symbol": meta["instrument"].replace("_", ""),
+                        "hint_side": meta["side"],
+                        "model_version": "auto_close",
+                        "avg_auc": None,
+                        "pair_score": meta.get("pair_score"),
+                        "equity_used": None,
+                        "trend_regime": None,
+                        "vol_regime": None,
+                        "spread_pips": None,
+                        "spread_atr": None,
+                        "confidence": 0,
+                        "side_prob": 0,
+                        "p_up": 0,
+                        "margin": 0,
+                        "decision": "NONE",
+                        "would_order": False,
+                        "units": abs(int(meta["units_signed"])),
+                        "units_signed": meta["units_signed"],
+                        "sl_pips": None,
+                        "tp_pips": None,
+                        "sl_price": meta["sl_price"],
+                        "tp_price": meta["tp_price"],
+                        "why": f"AUTO_CLOSE_FAILED | order_id={order_id} | status_code={close_result.get('status_code')} | error={json.dumps(close_result.get('error', ''))[:1000]}",
+                    })
                     continue
 
                 row = {
@@ -953,14 +950,42 @@ def auto_close_worker() -> None:
                 note_trade_closed(order_id)
                 _open_trade_meta.pop(order_id, None)
 
-        except Exception:
-            pass
+        except Exception as e:
+            write_audit_row({
+                "ts": utc_ts(),
+                "pair": "",
+                "instrument": "",
+                "symbol": "",
+                "hint_side": "",
+                "model_version": "auto_close",
+                "avg_auc": None,
+                "pair_score": None,
+                "equity_used": None,
+                "trend_regime": None,
+                "vol_regime": None,
+                "spread_pips": None,
+                "spread_atr": None,
+                "confidence": 0,
+                "side_prob": 0,
+                "p_up": 0,
+                "margin": 0,
+                "decision": "NONE",
+                "would_order": False,
+                "units": None,
+                "units_signed": None,
+                "sl_pips": None,
+                "tp_pips": None,
+                "sl_price": None,
+                "tp_price": None,
+                "why": f"AUTO_CLOSE_WORKER_EXCEPTION | {repr(e)}",
+            })
 
         time.sleep(AUTO_CLOSE_CHECK_SECONDS)
+
 # ====================================================
 # APP
 # ====================================================
-app = FastAPI(title="FX Sniper Per Pair", version="7.0-autoclose-db")
+app = FastAPI(title="FX Sniper Per Pair", version="7.1-autoclose-db-fixed")
 
 @app.on_event("startup")
 def _startup() -> None:
@@ -1257,6 +1282,7 @@ def health():
         "db_path": DB_PATH,
         "auto_close_enabled": AUTO_CLOSE_ENABLED,
         "max_hold_minutes": MAX_HOLD_MINUTES,
+        "auto_close_check_seconds": AUTO_CLOSE_CHECK_SECONDS,
         "current_open_trades": current_open_trade_count(),
     }
 
