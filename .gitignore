@@ -1,0 +1,69 @@
+# ====================================================
+# Runtime logs / trade records
+# ====================================================
+logs/
+*.log
+*.db
+*.sqlite
+*.sqlite3
+audit.csv
+trades.csv
+closed_trades_export.xlsx
+
+# ====================================================
+# Secrets / environment variables
+# ====================================================
+.env
+.env.*
+!.env.example
+
+# ====================================================
+# Python cache / virtual environments
+# ====================================================
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+.venv/
+venv/
+env/
+ENV/
+
+# ====================================================
+# Jupyter / notebooks checkpoints
+# ====================================================
+.ipynb_checkpoints/
+
+# ====================================================
+# OS / editor files
+# ====================================================
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# ====================================================
+# Build / packaging
+# ====================================================
+build/
+dist/
+*.egg-info/
+
+# ====================================================
+# Local temp files
+# ====================================================
+tmp/
+temp/
+*.tmp
+
+# Optional: uncomment if candle data is too large
+# oanda_h1_ba_live/
+
+# Optional: uncomment if model files are too large
+# models/
+# models_h1/

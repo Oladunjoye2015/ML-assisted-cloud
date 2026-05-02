@@ -1,0 +1,30 @@
+{
+  "pair": "AUDJPY",
+  "model_name": "catboost",
+  "live_model_type": "catboost",
+  "gate": 0.62,
+  "margin_gate": 0.02,
+  "min_pair_score_to_trade": 0.3,
+  "pair_score": 0.5015642720534222,
+  "tradable": true,
+  "horizon_bars": 8,
+  "sl_atr": 1.0,
+  "tp_atr": 1.3,
+  "tcn_policy": {
+    "mode": "challenger_until_clear_winner",
+    "tcn_min_precision_edge": 0.03,
+    "tcn_min_auc": 0.53,
+    "tcn_min_trades": 30,
+    "tcn_min_pair_score": 0.35,
+    "tcn_live_allowed": false,
+    "tcn_block_reason": "tcn_not_trained_or_failed",
+    "best_tabular_model": "catboost",
+    "best_tabular_precision_at_gate": 0.5569272976680384,
+    "best_tabular_auc": 0.5476102824235383,
+    "best_tabular_pair_score": 0.5015642720534222,
+    "tcn_precision_at_gate": null,
+    "tcn_auc": null,
+    "tcn_pair_score": null,
+    "tcn_trades_at_gate": null
+  }
+}

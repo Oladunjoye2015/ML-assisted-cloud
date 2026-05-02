@@ -1,0 +1,30 @@
+{
+  "pair": "EURGBP",
+  "model_name": "extra_trees",
+  "live_model_type": "extra_trees",
+  "gate": 0.62,
+  "margin_gate": 0.02,
+  "min_pair_score_to_trade": 0.3,
+  "pair_score": 0.8258776452060025,
+  "tradable": true,
+  "horizon_bars": 8,
+  "sl_atr": 1.0,
+  "tp_atr": 1.3,
+  "tcn_policy": {
+    "mode": "challenger_until_clear_winner",
+    "tcn_min_precision_edge": 0.03,
+    "tcn_min_auc": 0.53,
+    "tcn_min_trades": 30,
+    "tcn_min_pair_score": 0.35,
+    "tcn_live_allowed": false,
+    "tcn_block_reason": "tcn_not_trained_or_failed",
+    "best_tabular_model": "extra_trees",
+    "best_tabular_precision_at_gate": 0.6413043478260869,
+    "best_tabular_auc": 0.552587234392339,
+    "best_tabular_pair_score": 0.8258776452060025,
+    "tcn_precision_at_gate": null,
+    "tcn_auc": null,
+    "tcn_pair_score": null,
+    "tcn_trades_at_gate": null
+  }
+}
