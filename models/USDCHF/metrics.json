@@ -54,7 +54,7 @@
     {
       "model_name": "extra_trees",
       "auc": 0.5301411621581938,
-      "brier": 0.25102672241924223,
+      "brier": 0.2510267224192423,
       "accuracy": 0.54020507285483,
       "best_gate": 0.52,
       "best_margin_gate": 0.02,

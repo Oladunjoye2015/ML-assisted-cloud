@@ -34,6 +34,8 @@ Output:
     models/<PAIR>/thresholds.json
     models/<PAIR>/metrics.json
     models/<PAIR>/feature_columns.json
+    models/<PAIR>/candidate_models/*.pkl
+    models/<PAIR>/candidate_metrics.json
 
 If TCN wins:
     models/<PAIR>/best_tcn.pt
@@ -920,7 +922,7 @@ def train_tcn_model(
     Xtr_seq, ytr_seq = make_sequences(X_train_scaled, y_train, TCN_WINDOW)
     Xva_seq, yva_seq = make_sequences(X_valid_scaled, y_valid, TCN_WINDOW)
 
-        # Speed control for large datasets
+    # Speed control for large datasets
     MAX_TCN_TRAIN_SEQUENCES = int(os.getenv("MAX_TCN_TRAIN_SEQUENCES", "12000"))
 
     if len(Xtr_seq) > MAX_TCN_TRAIN_SEQUENCES:
@@ -1215,6 +1217,23 @@ def train_pair(csv_path: Path) -> Dict[str, Any]:
     }
 
     save_json(pair_dir / "metrics.json", all_metrics)
+
+
+    # ============================================================
+    # Save all candidate tabular models for server fallback / shadow logic
+    # ============================================================
+    candidate_dir = pair_dir / "candidate_models"
+    ensure_dir(candidate_dir)
+
+    candidate_metrics = {m.model_name: asdict(m) for m in metric_list}
+    save_json(pair_dir / "candidate_metrics.json", candidate_metrics)
+
+    for model_name, fitted_model in fitted_models.items():
+        try:
+            joblib.dump(fitted_model, candidate_dir / f"{model_name}.pkl")
+            print(f"  Saved candidate model: {model_name}")
+        except Exception as e:
+            print(f"  WARNING: could not save candidate model {model_name}: {e}")
 
     # Save the selected live model.
     if best.model_name == "neural_tcn":

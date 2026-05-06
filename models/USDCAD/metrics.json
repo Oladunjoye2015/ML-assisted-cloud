@@ -10,7 +10,7 @@
   "best": {
     "model_name": "extra_trees",
     "auc": 0.5256735477203947,
-    "brier": 0.2493158580021638,
+    "brier": 0.24931585800216377,
     "accuracy": 0.5143805309734514,
     "best_gate": 0.64,
     "best_margin_gate": 0.02,
@@ -24,7 +24,7 @@
   "best_tabular": {
     "model_name": "extra_trees",
     "auc": 0.5256735477203947,
-    "brier": 0.2493158580021638,
+    "brier": 0.24931585800216377,
     "accuracy": 0.5143805309734514,
     "best_gate": 0.64,
     "best_margin_gate": 0.02,
@@ -54,7 +54,7 @@
     {
       "model_name": "extra_trees",
       "auc": 0.5256735477203947,
-      "brier": 0.2493158580021638,
+      "brier": 0.24931585800216377,
       "accuracy": 0.5143805309734514,
       "best_gate": 0.64,
       "best_margin_gate": 0.02,

@@ -1,0 +1,54 @@
+{
+  "logistic_regression": {
+    "model_name": "logistic_regression",
+    "auc": 0.5010718107939021,
+    "brier": 0.2509304841125433,
+    "accuracy": 0.49948559670781895,
+    "best_gate": 0.58,
+    "best_margin_gate": 0.02,
+    "precision_at_gate": 0.5970149253731343,
+    "trades_at_gate": 67,
+    "long_rate": 0.5627572016460906,
+    "pair_score": 0.508936825416532,
+    "tradable": false
+  },
+  "extra_trees": {
+    "model_name": "extra_trees",
+    "auc": 0.5251819961192511,
+    "brier": 0.25076189258337583,
+    "accuracy": 0.5108024691358025,
+    "best_gate": 0.58,
+    "best_margin_gate": 0.02,
+    "precision_at_gate": 0.5714285714285714,
+    "trades_at_gate": 294,
+    "long_rate": 0.3786008230452675,
+    "pair_score": 0.48745075026251505,
+    "tradable": true
+  },
+  "lightgbm": {
+    "model_name": "lightgbm",
+    "auc": 0.5197313751041377,
+    "brier": 0.2812934176489582,
+    "accuracy": 0.5128600823045267,
+    "best_gate": 0.62,
+    "best_margin_gate": 0.02,
+    "precision_at_gate": 0.5320623916811091,
+    "trades_at_gate": 1154,
+    "long_rate": 0.39814814814814814,
+    "pair_score": 0.3267562281431466,
+    "tradable": false
+  },
+  "catboost": {
+    "model_name": "catboost",
+    "auc": 0.5105524403940875,
+    "brier": 0.2655761530239377,
+    "accuracy": 0.4974279835390947,
+    "best_gate": 0.66,
+    "best_margin_gate": 0.02,
+    "precision_at_gate": 0.5444444444444444,
+    "trades_at_gate": 450,
+    "long_rate": 0.35905349794238683,
+    "pair_score": 0.3446202841452254,
+    "tradable": false
+  }
+}
