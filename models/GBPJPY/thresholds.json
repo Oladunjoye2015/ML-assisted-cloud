@@ -2,7 +2,7 @@
   "pair": "GBPJPY",
   "model_name": "logistic_regression",
   "live_model_type": "logistic_regression",
-  "gate": 0.6,
+  "gate": 0.58,
   "margin_gate": 0.02,
   "min_pair_score_to_trade": 0.3,
   "pair_score": 0.9633235454061116,
@@ -26,5 +26,7 @@
     "tcn_auc": null,
     "tcn_pair_score": null,
     "tcn_trades_at_gate": null
-  }
+  },
+  "manual_gate_override": true,
+  "manual_gate_reason": "Lowered slightly because live confidence clusters in the 0.55-0.59 range."
 }
