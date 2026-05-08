@@ -100,6 +100,21 @@ FALLBACK_MIN_TRADES_AT_GATE = int(os.getenv("FALLBACK_MIN_TRADES_AT_GATE", "100"
 FALLBACK_REQUIRE_HINT_AGREE = os.getenv("FALLBACK_REQUIRE_HINT_AGREE", "true").lower() == "true"
 
 # ====================================================
+# AUTO MODEL SWITCH / PERFORMANCE SETTINGS
+# ====================================================
+AUTO_MODEL_SWITCH_ENABLED = os.getenv("AUTO_MODEL_SWITCH_ENABLED", "true").lower() == "true"
+SWITCH_MIN_ALERTS = int(os.getenv("SWITCH_MIN_ALERTS", "25"))
+SWITCH_MIN_CANDIDATE_WOULD_ORDERS = int(os.getenv("SWITCH_MIN_CANDIDATE_WOULD_ORDERS", "3"))
+SWITCH_MIN_CONF_EDGE = float(os.getenv("SWITCH_MIN_CONF_EDGE", "0.03"))
+SWITCH_MIN_AUC = float(os.getenv("SWITCH_MIN_AUC", "0.53"))
+SWITCH_MIN_PRECISION = float(os.getenv("SWITCH_MIN_PRECISION", "0.58"))
+SWITCH_MIN_TRADES_AT_GATE = int(os.getenv("SWITCH_MIN_TRADES_AT_GATE", "50"))
+SWITCH_REQUIRE_HINT_AGREE = os.getenv("SWITCH_REQUIRE_HINT_AGREE", "true").lower() == "true"
+SWITCH_MAX_PRIMARY_WOULD_ORDERS = int(os.getenv("SWITCH_MAX_PRIMARY_WOULD_ORDERS", "0"))
+SWITCH_COOLDOWN_MINUTES = int(os.getenv("SWITCH_COOLDOWN_MINUTES", "360"))
+SWITCH_LOOKBACK_EVENTS = int(os.getenv("SWITCH_LOOKBACK_EVENTS", "250"))
+
+# ====================================================
 # PAIRS
 # ====================================================
 PAIR_MAP: Dict[str, str] = {
@@ -220,6 +235,7 @@ def db_conn() -> sqlite3.Connection:
 def init_db() -> None:
     conn = db_conn()
     cur = conn.cursor()
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS trade_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -231,7 +247,47 @@ def init_db() -> None:
     cur.execute("CREATE INDEX IF NOT EXISTS idx_trade_events_order_id ON trade_events(order_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_trade_events_status ON trade_events(status)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_trade_events_ts ON trade_events(ts)")
-    conn.commit(); conn.close()
+
+    # Logs every model's prediction per alert: primary + shadow/fallback candidates.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS model_signal_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT,
+            signal_id TEXT,
+            pair TEXT,
+            instrument TEXT,
+            role TEXT,
+            model_name TEXT,
+            side TEXT,
+            p_up REAL,
+            confidence REAL,
+            margin REAL,
+            model_would_order INTEGER,
+            actual_order_sent INTEGER,
+            decision_source TEXT,
+            hint_side TEXT,
+            conf_gate REAL,
+            margin_gate REAL,
+            reason TEXT
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_model_signal_pair_ts ON model_signal_events(pair, ts)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_model_signal_pair_model ON model_signal_events(pair, model_name)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_model_signal_signal_id ON model_signal_events(signal_id)")
+
+    # Stores runtime active-model switches per pair.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS model_active_overrides (
+            pair TEXT PRIMARY KEY,
+            active_model TEXT,
+            previous_model TEXT,
+            reason TEXT,
+            updated_at TEXT
+        )
+    """)
+
+    conn.commit()
+    conn.close()
 
 def insert_trade_event_db(row: Dict[str, Any]) -> None:
     conn = db_conn(); cur = conn.cursor()
@@ -568,13 +624,33 @@ def load_new_model_bundle(pair_dir: Path) -> Optional[Dict[str, Any]]:
         for model_file in sorted(candidate_dir.glob("*.pkl")):
             try: candidate_models[model_file.stem] = joblib.load(model_file)
             except Exception as e: print(f"WARNING: could not load candidate {pair6}/{model_file.stem}: {e}")
+
+    # Optional active model override, written by the auto-switch logic.
+    active_override = load_json_safe(pair_dir / "active_model_override.json", {})
+    active_model_override = str(active_override.get("active_model") or "").strip()
+    previous_model_override = str(active_override.get("previous_model") or "").strip()
+    active_override_reason = str(active_override.get("reason") or "")
+    active_override_updated_at = str(active_override.get("updated_at") or "")
+
+    if active_model_override and active_model_override in candidate_models:
+        model = candidate_models[active_model_override]
+        model_type = active_model_override
+        print(f"Using active override for {pair6}: {model_type} instead of saved best model.")
+
     best = get_best_metrics(metrics)
     passed_filter, filter_reason = pair_passes_static_training_filter(pair6, metrics)
+    active_metric = candidate_metrics.get(model_type, best) if isinstance(candidate_metrics, dict) else best
+
     return {
         "pair6": pair6, "instrument": pair_to_instrument(pair6), "model": model, "model_type": model_type,
+        "saved_best_model_type": str(model_type_json.get("model_type") or thresholds.get("model_name") or "").strip(),
+        "active_model_override": active_model_override or None,
+        "active_override_previous_model": previous_model_override or None,
+        "active_override_reason": active_override_reason or None,
+        "active_override_updated_at": active_override_updated_at or None,
         "candidate_models": candidate_models, "candidate_metrics": candidate_metrics,
         "feature_order": list(feature_columns), "thresholds": thresholds, "metrics": metrics, "best": best,
-        "avg_auc": safe_float(best.get("auc"), 0.0), "precision_at_gate": safe_float(best.get("precision_at_gate"), 0.0), "trades_at_gate": safe_int(best.get("trades_at_gate"), 0), "training_pair_score": safe_float(best.get("pair_score"), 0.0), "training_tradable": bool(metrics.get("tradable", False)),
+        "avg_auc": safe_float(active_metric.get("auc"), safe_float(best.get("auc"), 0.0)), "precision_at_gate": safe_float(active_metric.get("precision_at_gate"), safe_float(best.get("precision_at_gate"), 0.0)), "trades_at_gate": safe_int(active_metric.get("trades_at_gate"), safe_int(best.get("trades_at_gate"), 0)), "training_pair_score": safe_float(active_metric.get("pair_score"), safe_float(best.get("pair_score"), 0.0)), "training_tradable": bool(metrics.get("tradable", False)),
         "static_filter_passed": passed_filter, "static_filter_reason": filter_reason,
         "labeling": {"sl_atr": safe_float(thresholds.get("sl_atr"), DEFAULT_SL_ATR), "tp_atr": safe_float(thresholds.get("tp_atr"), DEFAULT_TP_ATR)},
         "gate": safe_float(thresholds.get("gate"), DEFAULT_GATE["conf"]), "margin_gate": safe_float(thresholds.get("margin_gate"), DEFAULT_GATE["margin"]),
@@ -629,6 +705,320 @@ def evaluate_candidate_models_for_fallback(b: Dict[str, Any], X: pd.DataFrame, p
     if best_candidate is None:
         return {"fallback_allowed": False, "fallback_used": False, "fallback_reason": "no_candidate_passed_strict_fallback_rules", "candidate_votes": candidate_votes}
     return {"fallback_allowed": True, "fallback_used": True, "fallback_reason": "fallback_candidate_passed_strict_rules", "fallback_model": best_candidate["model_name"], "fallback_side": best_candidate["side"], "fallback_p_up": best_candidate["p_up"], "fallback_confidence": best_candidate["confidence"], "fallback_margin": best_candidate["margin"], "candidate_votes": candidate_votes}
+
+
+# ====================================================
+# MODEL PERFORMANCE TRACKING / AUTO SWITCHING
+# ====================================================
+def insert_model_signal_event(row: Dict[str, Any]) -> None:
+    conn = db_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO model_signal_events
+        (ts, signal_id, pair, instrument, role, model_name, side, p_up, confidence, margin,
+         model_would_order, actual_order_sent, decision_source, hint_side, conf_gate, margin_gate, reason)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            row.get("ts"), row.get("signal_id"), row.get("pair"), row.get("instrument"),
+            row.get("role"), row.get("model_name"), row.get("side"), row.get("p_up"),
+            row.get("confidence"), row.get("margin"), int(bool(row.get("model_would_order"))),
+            int(bool(row.get("actual_order_sent"))), row.get("decision_source"), row.get("hint_side"),
+            row.get("conf_gate"), row.get("margin_gate"), row.get("reason"),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def log_model_signal_events(
+    pair6: str,
+    instrument: str,
+    signal_id: str,
+    hint_side: str,
+    primary_model_type: str,
+    primary_side: str,
+    primary_p_up: float,
+    primary_confidence: float,
+    primary_margin: float,
+    primary_would_order: bool,
+    final_order_allowed: bool,
+    decision_source: str,
+    conf_gate: float,
+    margin_gate: float,
+    fallback_result: Dict[str, Any],
+    reason: str,
+) -> None:
+    ts = utc_ts()
+    insert_model_signal_event({
+        "ts": ts,
+        "signal_id": signal_id,
+        "pair": pair6,
+        "instrument": instrument,
+        "role": "primary",
+        "model_name": primary_model_type,
+        "side": primary_side,
+        "p_up": float(primary_p_up),
+        "confidence": float(primary_confidence),
+        "margin": float(primary_margin),
+        "model_would_order": bool(primary_would_order),
+        "actual_order_sent": bool(final_order_allowed and decision_source == "primary"),
+        "decision_source": decision_source,
+        "hint_side": hint_side,
+        "conf_gate": conf_gate,
+        "margin_gate": margin_gate,
+        "reason": reason,
+    })
+
+    candidate_votes = fallback_result.get("candidate_votes") or {}
+    for model_name, vote in candidate_votes.items():
+        insert_model_signal_event({
+            "ts": ts,
+            "signal_id": signal_id,
+            "pair": pair6,
+            "instrument": instrument,
+            "role": "candidate",
+            "model_name": model_name,
+            "side": vote.get("side"),
+            "p_up": safe_float(vote.get("p_up"), 0.0),
+            "confidence": safe_float(vote.get("confidence"), 0.0),
+            "margin": safe_float(vote.get("margin"), 0.0),
+            "model_would_order": bool(vote.get("ok", False)),
+            "actual_order_sent": bool(final_order_allowed and decision_source == "fallback" and model_name == fallback_result.get("fallback_model")),
+            "decision_source": decision_source,
+            "hint_side": hint_side,
+            "conf_gate": safe_float(vote.get("fallback_conf_gate"), conf_gate),
+            "margin_gate": safe_float(vote.get("fallback_margin_gate"), margin_gate),
+            "reason": str(vote.get("quality_reason") or fallback_result.get("fallback_reason") or ""),
+        })
+
+
+def read_active_override_from_db(pair6: str) -> Optional[Dict[str, Any]]:
+    try:
+        conn = db_conn()
+        row = conn.execute("SELECT * FROM model_active_overrides WHERE pair = ?", (pair6,)).fetchone()
+        conn.close()
+        return dict(row) if row else None
+    except Exception:
+        return None
+
+
+def write_active_model_override(pair6: str, new_model: str, previous_model: str, reason: str, b: Dict[str, Any]) -> None:
+    updated_at = utc_ts()
+    conn = db_conn()
+    conn.execute(
+        """
+        INSERT INTO model_active_overrides(pair, active_model, previous_model, reason, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(pair) DO UPDATE SET
+            active_model=excluded.active_model,
+            previous_model=excluded.previous_model,
+            reason=excluded.reason,
+            updated_at=excluded.updated_at
+        """,
+        (pair6, new_model, previous_model, reason, updated_at),
+    )
+    conn.commit()
+    conn.close()
+
+    pair_dir = Path(b.get("_bundle_path") or Path(MODELS_DIR) / pair6)
+    try:
+        payload = {
+            "pair": pair6,
+            "active_model": new_model,
+            "previous_model": previous_model,
+            "reason": reason,
+            "updated_at": updated_at,
+        }
+        pair_dir.mkdir(parents=True, exist_ok=True)
+        (pair_dir / "active_model_override.json").write_text(json.dumps(payload, indent=2))
+    except Exception as e:
+        print(f"WARNING: could not write active_model_override.json for {pair6}: {e}")
+
+    # Update in-memory bundle immediately so the next alert uses the switched model.
+    candidate_models = b.get("candidate_models") or {}
+    candidate_metrics = b.get("candidate_metrics") or {}
+    if new_model in candidate_models:
+        b["model"] = candidate_models[new_model]
+        b["model_type"] = new_model
+        b["active_model_override"] = new_model
+        b["active_override_previous_model"] = previous_model
+        b["active_override_reason"] = reason
+        b["active_override_updated_at"] = updated_at
+        metric = candidate_metrics.get(new_model, {})
+        if metric:
+            b["avg_auc"] = safe_float(metric.get("auc"), b.get("avg_auc", 0.0))
+            b["precision_at_gate"] = safe_float(metric.get("precision_at_gate"), b.get("precision_at_gate", 0.0))
+            b["trades_at_gate"] = safe_int(metric.get("trades_at_gate"), b.get("trades_at_gate", 0))
+            b["training_pair_score"] = safe_float(metric.get("pair_score"), b.get("training_pair_score", 0.0))
+            b["model_version"] = f"{pair6}:{new_model}:override"
+
+
+def candidate_metric_is_good_for_switch(metric: Dict[str, Any]) -> Tuple[bool, str]:
+    auc = safe_float(metric.get("auc"), 0.0)
+    precision = safe_float(metric.get("precision_at_gate"), 0.0)
+    trades = safe_int(metric.get("trades_at_gate"), 0)
+    tradable = bool(metric.get("tradable", False))
+    reasons = []
+    if not tradable:
+        reasons.append("candidate_not_tradable")
+    if auc < SWITCH_MIN_AUC:
+        reasons.append(f"auc_too_low:{auc:.4f}<{SWITCH_MIN_AUC:.4f}")
+    if precision < SWITCH_MIN_PRECISION:
+        reasons.append(f"precision_too_low:{precision:.4f}<{SWITCH_MIN_PRECISION:.4f}")
+    if trades < SWITCH_MIN_TRADES_AT_GATE:
+        reasons.append(f"trades_too_low:{trades}<{SWITCH_MIN_TRADES_AT_GATE}")
+    return (False, "; ".join(reasons)) if reasons else (True, "candidate_passed_switch_quality")
+
+
+def maybe_auto_switch_model(pair6: str, b: Dict[str, Any]) -> Dict[str, Any]:
+    if not AUTO_MODEL_SWITCH_ENABLED:
+        return {"switched": False, "reason": "auto_switch_disabled"}
+
+    active_model = str(b.get("model_type") or "")
+    if not active_model:
+        return {"switched": False, "reason": "no_active_model"}
+
+    # Cooldown so it does not flip back and forth too quickly.
+    existing = read_active_override_from_db(pair6)
+    if existing and existing.get("updated_at"):
+        try:
+            updated_at = pd.to_datetime(existing["updated_at"], utc=True).to_pydatetime()
+            age_min = (now_utc() - updated_at).total_seconds() / 60.0
+            if age_min < SWITCH_COOLDOWN_MINUTES:
+                return {"switched": False, "reason": f"switch_cooldown_active:{age_min:.1f}m<{SWITCH_COOLDOWN_MINUTES}m"}
+        except Exception:
+            pass
+
+    conn = db_conn()
+    primary_rows = conn.execute(
+        """
+        SELECT * FROM model_signal_events
+        WHERE pair = ? AND role = 'primary' AND model_name = ?
+        ORDER BY id DESC LIMIT ?
+        """,
+        (pair6, active_model, SWITCH_LOOKBACK_EVENTS),
+    ).fetchall()
+
+    primary_alerts = len(primary_rows)
+    if primary_alerts < SWITCH_MIN_ALERTS:
+        conn.close()
+        return {"switched": False, "reason": f"not_enough_primary_alerts:{primary_alerts}<{SWITCH_MIN_ALERTS}"}
+
+    primary_would = sum(int(r["model_would_order"] or 0) for r in primary_rows)
+    primary_conf_values = [safe_float(r["confidence"], 0.0) for r in primary_rows]
+    primary_avg_conf = float(np.mean(primary_conf_values)) if primary_conf_values else 0.0
+
+    if primary_would > SWITCH_MAX_PRIMARY_WOULD_ORDERS:
+        conn.close()
+        return {"switched": False, "reason": f"primary_not_inactive:primary_would={primary_would}>{SWITCH_MAX_PRIMARY_WOULD_ORDERS}"}
+
+    candidate_rows = conn.execute(
+        """
+        SELECT * FROM model_signal_events
+        WHERE pair = ? AND role = 'candidate'
+        ORDER BY id DESC LIMIT ?
+        """,
+        (pair6, SWITCH_LOOKBACK_EVENTS * max(2, len(b.get("candidate_models") or {}))),
+    ).fetchall()
+    conn.close()
+
+    by_model: Dict[str, List[Any]] = {}
+    for r in candidate_rows:
+        model_name = str(r["model_name"])
+        if model_name == active_model:
+            continue
+        by_model.setdefault(model_name, []).append(r)
+
+    candidate_metrics = b.get("candidate_metrics") or {}
+    best_candidate = None
+
+    for model_name, rows in by_model.items():
+        # Use only recent rows, roughly same alert-count window.
+        rows = rows[:SWITCH_LOOKBACK_EVENTS]
+        would_count = sum(int(r["model_would_order"] or 0) for r in rows)
+        avg_conf = float(np.mean([safe_float(r["confidence"], 0.0) for r in rows])) if rows else 0.0
+        quality_ok, quality_reason = candidate_metric_is_good_for_switch(candidate_metrics.get(model_name, {}))
+
+        if not quality_ok:
+            continue
+        if would_count < SWITCH_MIN_CANDIDATE_WOULD_ORDERS:
+            continue
+        if avg_conf < primary_avg_conf + SWITCH_MIN_CONF_EDGE:
+            continue
+
+        rec = {
+            "model_name": model_name,
+            "would_count": would_count,
+            "avg_conf": avg_conf,
+            "quality_reason": quality_reason,
+        }
+        if best_candidate is None:
+            best_candidate = rec
+        elif (rec["would_count"], rec["avg_conf"]) > (best_candidate["would_count"], best_candidate["avg_conf"]):
+            best_candidate = rec
+
+    if best_candidate is None:
+        return {
+            "switched": False,
+            "reason": "no_candidate_met_switch_rules",
+            "primary_alerts": primary_alerts,
+            "primary_would": primary_would,
+            "primary_avg_conf": primary_avg_conf,
+        }
+
+    reason = (
+        f"auto_switch_primary_inactive | primary={active_model}, "
+        f"primary_alerts={primary_alerts}, primary_would={primary_would}, "
+        f"primary_avg_conf={primary_avg_conf:.4f}, new_model={best_candidate['model_name']}, "
+        f"candidate_would={best_candidate['would_count']}, candidate_avg_conf={best_candidate['avg_conf']:.4f}"
+    )
+    write_active_model_override(pair6, best_candidate["model_name"], active_model, reason, b)
+    return {"switched": True, "reason": reason, "new_model": best_candidate["model_name"], "previous_model": active_model}
+
+
+def model_performance_summary() -> Dict[str, Any]:
+    conn = db_conn()
+    rows = conn.execute(
+        """
+        SELECT pair, instrument, role, model_name,
+               COUNT(*) AS signals_seen,
+               SUM(model_would_order) AS would_order_count,
+               SUM(actual_order_sent) AS actual_order_count,
+               AVG(confidence) AS avg_confidence,
+               AVG(margin) AS avg_margin,
+               MAX(ts) AS last_ts
+        FROM model_signal_events
+        GROUP BY pair, instrument, role, model_name
+        ORDER BY pair, role, model_name
+        """
+    ).fetchall()
+    overrides = conn.execute("SELECT * FROM model_active_overrides").fetchall()
+    conn.close()
+
+    out: Dict[str, Any] = {}
+    for r in rows:
+        pair = r["pair"]
+        out.setdefault(pair, {"models": {}, "active_override": None})
+        model_name = r["model_name"]
+        out[pair]["models"][model_name] = {
+            "role": r["role"],
+            "instrument": r["instrument"],
+            "signals_seen": safe_int(r["signals_seen"], 0),
+            "would_order_count": safe_int(r["would_order_count"], 0),
+            "actual_order_count": safe_int(r["actual_order_count"], 0),
+            "avg_confidence": safe_float(r["avg_confidence"], 0.0),
+            "avg_margin": safe_float(r["avg_margin"], 0.0),
+            "last_ts": r["last_ts"],
+        }
+
+    for r in overrides:
+        pair = r["pair"]
+        out.setdefault(pair, {"models": {}, "active_override": None})
+        out[pair]["active_override"] = dict(r)
+
+    return out
 
 BUNDLES = load_bundles(MODELS_DIR)
 
@@ -776,10 +1166,18 @@ def predict(p: TVPayload):
             out = make_out(decision="NONE", why=f"Blocked disagreement: ML {side} vs hint {hint_side} (conf {conf:.2f} < {DEFAULT_DISAGREE_CONF:.2f})", would_order=False, order_allowed=False, units=None, units_signed=None, sl_pips=None, tp_pips=None, sl_price=None, tp_price=None, model_type=model_type, precision_at_gate=precision_at_gate, trades_at_gate=trades_at_gate, static_filter_passed=static_filter_passed, static_filter_reason=static_filter_reason, conf_gate=conf_gate, margin_gate=margin_gate, decision_source="blocked_disagreement", primary_model_type=primary_model_type, primary_side=primary_side, primary_p_up=primary_p_up, primary_confidence=primary_confidence, primary_margin=primary_margin, fallback_used=False, fallback_allowed=False, fallback_reason="not_checked_due_to_disagreement", candidate_votes={}, **base); write_audit_row(out); return out
         primary_would_order = conf >= conf_gate and margin >= margin_gate
         would_order = primary_would_order
-        if not primary_would_order:
-            fallback_result = evaluate_candidate_models_for_fallback(b, X, primary_model_type, conf_gate, margin_gate, hint_side)
-            if fallback_result.get("fallback_allowed"):
-                decision_source = "fallback"; model_type = str(fallback_result["fallback_model"]); side = str(fallback_result["fallback_side"]); p_up = float(fallback_result["fallback_p_up"]); conf = float(fallback_result["fallback_confidence"]); side_prob = conf; margin = float(fallback_result["fallback_margin"]); would_order = True
+
+        # Always run candidates in shadow so /model_performance can compare every model.
+        fallback_result = evaluate_candidate_models_for_fallback(b, X, primary_model_type, conf_gate, margin_gate, hint_side)
+
+        # Only let fallback control this alert if the primary blocked.
+        if primary_would_order:
+            fallback_result["fallback_allowed"] = False
+            fallback_result["fallback_used"] = False
+            fallback_result["fallback_reason"] = "primary_passed_fallback_not_needed"
+        elif fallback_result.get("fallback_allowed"):
+            decision_source = "fallback"; model_type = str(fallback_result["fallback_model"]); side = str(fallback_result["fallback_side"]); p_up = float(fallback_result["fallback_p_up"]); conf = float(fallback_result["fallback_confidence"]); side_prob = conf; margin = float(fallback_result["fallback_margin"]); would_order = True
+
         fingerprint = make_signal_fingerprint(instrument, side, p.t, float(p.mid_c), p.tf)
         if would_order and is_duplicate_signal(pair6, fingerprint):
             out = make_out(decision="NONE", why=f"Duplicate signal blocked for {instrument}", would_order=False, order_allowed=False, units=None, units_signed=None, sl_pips=None, tp_pips=None, sl_price=None, tp_price=None, model_type=model_type, precision_at_gate=precision_at_gate, trades_at_gate=trades_at_gate, static_filter_passed=static_filter_passed, static_filter_reason=static_filter_reason, conf_gate=conf_gate, margin_gate=margin_gate, decision_source=decision_source, primary_model_type=primary_model_type, primary_side=primary_side, primary_p_up=primary_p_up, primary_confidence=primary_confidence, primary_margin=primary_margin, fallback_used=bool(fallback_result.get("fallback_used", False)), fallback_allowed=bool(fallback_result.get("fallback_allowed", False)), fallback_reason=fallback_result.get("fallback_reason"), candidate_votes=fallback_result.get("candidate_votes", {}), **base); write_audit_row(out); return out
@@ -787,6 +1185,30 @@ def predict(p: TVPayload):
         elif would_order and trades_today(pair6) >= MAX_TRADES_PER_DAY_PER_PAIR: would_order = False; block_reason = f"Daily lock: max trades for {instrument} reached"
         elif would_order and not can_open_trade(): would_order = False; block_reason = f"Open trade cap reached ({MAX_OPEN_TRADES})"
         else: block_reason = None
+
+        # Log primary + shadow model performance before order construction.
+        # final_order_allowed is after daily/open-trade caps, but before broker execution.
+        final_order_allowed_for_log = bool(would_order)
+        log_model_signal_events(
+            pair6=pair6,
+            instrument=instrument,
+            signal_id=fingerprint,
+            hint_side=hint_side,
+            primary_model_type=primary_model_type,
+            primary_side=primary_side,
+            primary_p_up=primary_p_up,
+            primary_confidence=primary_confidence,
+            primary_margin=primary_margin,
+            primary_would_order=primary_would_order,
+            final_order_allowed=final_order_allowed_for_log,
+            decision_source=decision_source,
+            conf_gate=conf_gate,
+            margin_gate=margin_gate,
+            fallback_result=fallback_result,
+            reason=block_reason or fallback_result.get("fallback_reason") or "",
+        )
+        auto_switch_result = maybe_auto_switch_model(pair6, b)
+
         units_abs = units_signed = sl_pips = tp_pips = sl_price = tp_price = None
         why = block_reason or (f"Below trained gate | primary_model={primary_model_type}, primary_conf={primary_confidence:.2f}/{conf_gate:.2f}, primary_margin={primary_margin:.2f}/{margin_gate:.2f}, fallback_used={fallback_result.get('fallback_used')}, fallback_reason={fallback_result.get('fallback_reason')}, pair_score={pair_score:.2f}")
         decision = "NONE"
@@ -800,7 +1222,7 @@ def predict(p: TVPayload):
             units_signed = units_abs if side == "BUY" else -units_abs
             why = f"OK: {side} passed | decision_source={decision_source}, model={model_type}, conf={conf:.2f}, margin={margin:.2f}, primary_model={primary_model_type}, primary_conf={primary_confidence:.2f}, primary_margin={primary_margin:.2f}, precision_at_gate={precision_at_gate:.2f}, trades_at_gate={trades_at_gate}, pair_score={pair_score:.2f}, equity_used={equity_used:.2f}"
             decision = side
-        out = make_out(decision=decision, why=why, would_order=bool(would_order), order_allowed=bool(would_order), units=units_abs, units_signed=units_signed, sl_pips=sl_pips, tp_pips=tp_pips, sl_price=sl_price, tp_price=tp_price, model_type=model_type, precision_at_gate=precision_at_gate, trades_at_gate=trades_at_gate, static_filter_passed=static_filter_passed, static_filter_reason=static_filter_reason, conf_gate=conf_gate, margin_gate=margin_gate, decision_source=decision_source, primary_model_type=primary_model_type, primary_side=primary_side, primary_p_up=primary_p_up, primary_confidence=primary_confidence, primary_margin=primary_margin, fallback_used=bool(fallback_result.get("fallback_used", False)), fallback_allowed=bool(fallback_result.get("fallback_allowed", False)), fallback_reason=fallback_result.get("fallback_reason"), fallback_model=fallback_result.get("fallback_model"), fallback_confidence=fallback_result.get("fallback_confidence"), fallback_margin=fallback_result.get("fallback_margin"), candidate_votes=fallback_result.get("candidate_votes", {}), **base)
+        out = make_out(decision=decision, why=why, would_order=bool(would_order), order_allowed=bool(would_order), units=units_abs, units_signed=units_signed, sl_pips=sl_pips, tp_pips=tp_pips, sl_price=sl_price, tp_price=tp_price, model_type=model_type, precision_at_gate=precision_at_gate, trades_at_gate=trades_at_gate, static_filter_passed=static_filter_passed, static_filter_reason=static_filter_reason, conf_gate=conf_gate, margin_gate=margin_gate, decision_source=decision_source, primary_model_type=primary_model_type, primary_side=primary_side, primary_p_up=primary_p_up, primary_confidence=primary_confidence, primary_margin=primary_margin, fallback_used=bool(fallback_result.get("fallback_used", False)), fallback_allowed=bool(fallback_result.get("fallback_allowed", False)), fallback_reason=fallback_result.get("fallback_reason"), fallback_model=fallback_result.get("fallback_model"), fallback_confidence=fallback_result.get("fallback_confidence"), fallback_margin=fallback_result.get("fallback_margin"), candidate_votes=fallback_result.get("candidate_votes", {}), auto_switch_result=auto_switch_result, active_model_after_switch=b.get("model_type"), **base)
         if would_order:
             remember_signal(pair6, fingerprint); inc_trade(pair6)
         write_audit_row(out); return out
@@ -828,13 +1250,47 @@ def trade_event(t: TradeEvent):
 
 @app.get("/health")
 def health():
-    return {"ok": True, "ts": utc_ts(), "model_format": "new_per_pair_best_model_with_fallback_candidates", "pairs_loaded": len(BUNDLES), "pairs": sorted([pair_to_instrument(p) for p in BUNDLES.keys()]), "pair_details": {pair: {"instrument": b.get("instrument"), "model_type": b.get("model_type"), "candidate_models_loaded": sorted(list((b.get("candidate_models") or {}).keys())), "auc": b.get("avg_auc"), "precision_at_gate": b.get("precision_at_gate"), "trades_at_gate": b.get("trades_at_gate"), "training_pair_score": b.get("training_pair_score"), "static_filter_passed": b.get("static_filter_passed"), "static_filter_reason": b.get("static_filter_reason"), "gate": b.get("gate"), "margin_gate": b.get("margin_gate")} for pair, b in BUNDLES.items()}, "strict_model_filter_enabled": STRICT_MODEL_FILTER_ENABLED, "live_min_auc": LIVE_MIN_AUC, "live_min_precision": LIVE_MIN_PRECISION, "live_min_trades_at_gate": LIVE_MIN_TRADES_AT_GATE, "live_min_pair_score": LIVE_MIN_PAIR_SCORE, "primary_live_pairs": sorted(PRIMARY_LIVE_PAIRS), "experimental_live_pairs": sorted(EXPERIMENTAL_LIVE_PAIRS), "allow_experimental_pairs": ALLOW_EXPERIMENTAL_PAIRS, "fallback_mode_enabled": FALLBACK_MODE_ENABLED, "fallback_conf_edge": FALLBACK_CONF_EDGE, "fallback_margin_edge": FALLBACK_MARGIN_EDGE, "fallback_min_auc": FALLBACK_MIN_AUC, "fallback_min_precision": FALLBACK_MIN_PRECISION, "fallback_min_trades_at_gate": FALLBACK_MIN_TRADES_AT_GATE, "fallback_require_hint_agree": FALLBACK_REQUIRE_HINT_AGREE, "db_path": DB_PATH, "data_dir": DATA_DIR, "models_dir": MODELS_DIR, "auto_close_enabled": AUTO_CLOSE_ENABLED, "max_hold_minutes": MAX_HOLD_MINUTES, "current_open_trades": current_open_trade_count()}
+    return {"ok": True, "ts": utc_ts(), "model_format": "new_per_pair_best_model_with_fallback_candidates", "pairs_loaded": len(BUNDLES), "pairs": sorted([pair_to_instrument(p) for p in BUNDLES.keys()]), "pair_details": {pair: {"instrument": b.get("instrument"), "model_type": b.get("model_type"), "candidate_models_loaded": sorted(list((b.get("candidate_models") or {}).keys())), "saved_best_model_type": b.get("saved_best_model_type"), "active_model_override": b.get("active_model_override"), "active_override_reason": b.get("active_override_reason"), "active_override_updated_at": b.get("active_override_updated_at"), "auc": b.get("avg_auc"), "precision_at_gate": b.get("precision_at_gate"), "trades_at_gate": b.get("trades_at_gate"), "training_pair_score": b.get("training_pair_score"), "static_filter_passed": b.get("static_filter_passed"), "static_filter_reason": b.get("static_filter_reason"), "gate": b.get("gate"), "margin_gate": b.get("margin_gate")} for pair, b in BUNDLES.items()}, "strict_model_filter_enabled": STRICT_MODEL_FILTER_ENABLED, "live_min_auc": LIVE_MIN_AUC, "live_min_precision": LIVE_MIN_PRECISION, "live_min_trades_at_gate": LIVE_MIN_TRADES_AT_GATE, "live_min_pair_score": LIVE_MIN_PAIR_SCORE, "primary_live_pairs": sorted(PRIMARY_LIVE_PAIRS), "experimental_live_pairs": sorted(EXPERIMENTAL_LIVE_PAIRS), "allow_experimental_pairs": ALLOW_EXPERIMENTAL_PAIRS, "fallback_mode_enabled": FALLBACK_MODE_ENABLED, "fallback_conf_edge": FALLBACK_CONF_EDGE, "fallback_margin_edge": FALLBACK_MARGIN_EDGE, "fallback_min_auc": FALLBACK_MIN_AUC, "fallback_min_precision": FALLBACK_MIN_PRECISION, "fallback_min_trades_at_gate": FALLBACK_MIN_TRADES_AT_GATE, "fallback_require_hint_agree": FALLBACK_REQUIRE_HINT_AGREE, "auto_model_switch_enabled": AUTO_MODEL_SWITCH_ENABLED, "switch_min_alerts": SWITCH_MIN_ALERTS, "switch_min_candidate_would_orders": SWITCH_MIN_CANDIDATE_WOULD_ORDERS, "switch_min_conf_edge": SWITCH_MIN_CONF_EDGE, "switch_min_auc": SWITCH_MIN_AUC, "switch_min_precision": SWITCH_MIN_PRECISION, "switch_min_trades_at_gate": SWITCH_MIN_TRADES_AT_GATE, "switch_max_primary_would_orders": SWITCH_MAX_PRIMARY_WOULD_ORDERS, "switch_cooldown_minutes": SWITCH_COOLDOWN_MINUTES, "db_path": DB_PATH, "data_dir": DATA_DIR, "models_dir": MODELS_DIR, "auto_close_enabled": AUTO_CLOSE_ENABLED, "max_hold_minutes": MAX_HOLD_MINUTES, "current_open_trades": current_open_trade_count()}
 
 @app.get("/stats")
 def stats():
     df = read_audit_df()
     if df.empty: return {"ok": True, "rows": 0, "would_order_count": 0, "decision_counts": {}, "pair_counts": {}, "last_ts": None}
     return {"ok": True, "rows": int(len(df)), "would_order_count": int(safe_bool_series(df, "would_order").sum()), "decision_counts": df["decision"].value_counts(dropna=False).to_dict() if "decision" in df.columns else {}, "pair_counts": df["instrument"].value_counts(dropna=False).to_dict() if "instrument" in df.columns else {}, "last_ts": pd.to_datetime(df["ts"], errors="coerce").dropna().max().isoformat() if "ts" in df.columns and not pd.to_datetime(df["ts"], errors="coerce").dropna().empty else None}
+
+@app.get("/model_performance")
+def model_performance():
+    return {
+        "ok": True,
+        "ts": utc_ts(),
+        "auto_model_switch_enabled": AUTO_MODEL_SWITCH_ENABLED,
+        "switch_rules": {
+            "switch_min_alerts": SWITCH_MIN_ALERTS,
+            "switch_min_candidate_would_orders": SWITCH_MIN_CANDIDATE_WOULD_ORDERS,
+            "switch_min_conf_edge": SWITCH_MIN_CONF_EDGE,
+            "switch_min_auc": SWITCH_MIN_AUC,
+            "switch_min_precision": SWITCH_MIN_PRECISION,
+            "switch_min_trades_at_gate": SWITCH_MIN_TRADES_AT_GATE,
+            "switch_max_primary_would_orders": SWITCH_MAX_PRIMARY_WOULD_ORDERS,
+            "switch_cooldown_minutes": SWITCH_COOLDOWN_MINUTES,
+            "switch_lookback_events": SWITCH_LOOKBACK_EVENTS,
+        },
+        "pairs": model_performance_summary(),
+    }
+
+@app.post("/model_override/{pair6}/{model_name}")
+def manual_model_override(pair6: str, model_name: str):
+    pair6 = pair6.upper().replace("_", "")
+    if pair6 not in BUNDLES:
+        return {"ok": False, "reason": "pair_not_loaded", "pair": pair6}
+    b = BUNDLES[pair6]
+    candidate_models = b.get("candidate_models") or {}
+    if model_name not in candidate_models:
+        return {"ok": False, "reason": "candidate_model_not_loaded", "pair": pair6, "model_name": model_name, "available": sorted(candidate_models.keys())}
+    previous = str(b.get("model_type") or "")
+    reason = f"manual_override:{previous}->{model_name}"
+    write_active_model_override(pair6, model_name, previous, reason, b)
+    return {"ok": True, "pair": pair6, "active_model": model_name, "previous_model": previous, "reason": reason}
 
 @app.get("/pnl_stats")
 def pnl_stats():
