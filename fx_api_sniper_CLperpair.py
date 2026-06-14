@@ -1973,9 +1973,19 @@ def _load_one_auto_registry_model(pair6: str, meta: Dict[str, Any]) -> Optional[
                     scaler = joblib.load(scaler_path)
             model = TCNRuntimeWrapper(pair6, tcn, scaler, features, TCN_LOOKBACK)
 
+        elif best_model in {
+            "xgboost",
+            "extra_trees",
+            "random_forest",
+            "logistic_regression",
+            "sklearn_pipeline",
+            "pipeline",
+        } or str(model_path).endswith(".pkl"):
+            model = joblib.load(model_path)
+
         else:
-            print(f"WARNING: unknown best_model for {pair6}: {best_model}")
-            return None
+            print(f"WARNING: unknown best_model for {pair6}: {best_model}; trying joblib load")
+            model = joblib.load(model_path)
 
         avg_auc = _avg_auc_from_auto_meta(meta)
         pair_score = safe_float(meta.get("pair_score"), compute_pair_score(pair_to_instrument(pair6), avg_auc))
