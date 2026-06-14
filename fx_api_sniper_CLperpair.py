@@ -2005,7 +2005,7 @@ def _load_one_auto_registry_model(pair6: str, meta: Dict[str, Any]) -> Optional[
             return None
 
         avg_auc = _avg_auc_from_auto_meta(meta)
-        pair_score = safe_float(meta.get("pair_score"), compute_pair_score(pair_to_instrument(pair6), avg_auc))
+        pair_score = safe_float(meta.get("pair_score"), 0.50)
         default_gate = safe_float(meta.get("default_gate"), DEFAULT_GATE["conf"])
         default_margin = safe_float(meta.get("default_margin"), DEFAULT_GATE["margin"])
 
