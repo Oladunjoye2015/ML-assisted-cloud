@@ -2213,6 +2213,7 @@ def build_oanda_h1_feature_row(payload: Dict[str, Any], pair6: str, instrument: 
         "_model_feature_source_reason": "not_started",
         "_model_feature_granularity": MODEL_FEATURE_OANDA_GRANULARITY,
     }
+    broker_ready = bool(OANDA_TOKEN and OANDA_ACCOUNT_ID and OANDA_BASE_URL)
     if not broker_ready():
         meta["_model_feature_source_used"] = "alert"
         meta["_model_feature_source_reason"] = "broker_not_ready"
