@@ -10,4 +10,5 @@ catboost
 lightgbm
 torch
 sqlalchemy
-openpyxl
+openpyxlxgboost
+xgboost

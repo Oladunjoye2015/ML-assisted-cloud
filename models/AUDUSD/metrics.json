@@ -89,6 +89,19 @@
       "long_rate": 0.4334349593495935,
       "pair_score": 0.15,
       "tradable": false
+    },
+    {
+      "model_name": "xgboost",
+      "auc": 0.49522693742948887,
+      "brier": 0.2850210210945006,
+      "accuracy": 0.49898373983739835,
+      "best_gate": 0.58,
+      "best_margin_gate": 0.02,
+      "precision_at_gate": 0.5026061057334326,
+      "trades_at_gate": 1343,
+      "long_rate": 0.43191056910569103,
+      "pair_score": 0.15955572102258606,
+      "tradable": false
     }
   ],
   "feature_count": 37,

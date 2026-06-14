@@ -2,7 +2,7 @@
   "pair": "GBPCHF",
   "model_name": "extra_trees",
   "live_model_type": "extra_trees",
-  "gate": 0.56,
+  "gate": 0.58,
   "margin_gate": 0.02,
   "min_pair_score_to_trade": 0.3,
   "pair_score": 0.9621644350120347,
@@ -26,7 +26,5 @@
     "tcn_auc": null,
     "tcn_pair_score": null,
     "tcn_trades_at_gate": null
-  },
-  "manual_gate_override": true,
-  "manual_gate_reason": "Lowered slightly because live confidence clusters in the 0.55-0.59 range."
+  }
 }

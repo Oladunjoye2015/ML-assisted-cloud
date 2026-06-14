@@ -59,6 +59,7 @@ import numpy as np
 import pandas as pd
 
 from sklearn.ensemble import ExtraTreesClassifier
+from xgboost import XGBClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, brier_score_loss, roc_auc_score
@@ -797,6 +798,32 @@ def build_classical_models() -> Dict[str, Any]:
     else:
         print("WARNING: CatBoost not installed. Skipping CatBoost.")
 
+
+    if XGBClassifier is not None:
+        models["xgboost"] = Pipeline(
+            steps=[
+                ("imputer", SimpleImputer(strategy="median")),
+                (
+                    "model",
+                    XGBClassifier(
+                        n_estimators=450,
+                        max_depth=4,
+                        learning_rate=0.035,
+                        subsample=0.85,
+                        colsample_bytree=0.85,
+                        min_child_weight=10,
+                        reg_lambda=2.0,
+                        reg_alpha=0.10,
+                        objective="binary:logistic",
+                        eval_metric="logloss",
+                        tree_method="hist",
+                        random_state=RANDOM_STATE,
+                        n_jobs=-1,
+                    ),
+                ),
+            ]
+        )
+
     return models
 
 
@@ -897,19 +924,13 @@ def train_tcn_model(
     y_valid: np.ndarray,
 ) -> Tuple[Optional[Any], Optional[ModelMetrics], Optional[Dict[str, Any]]]:
     if not TRAIN_TCN:
-        print("    Skipping neural_tcn: TRAIN_TCN=false.")
         return None, None, None
 
     if not HAS_TORCH:
-        print("    Skipping neural_tcn: torch not installed.")
         return None, None, None
 
     if len(X_train_df) < TCN_WINDOW * 5 or len(X_valid_df) < TCN_WINDOW * 2:
-        print("    Skipping neural_tcn: not enough rows for sequence training.")
         return None, None, None
-
-    print("    Training neural_tcn...")
-
     imputer = SimpleImputer(strategy="median")
     scaler = StandardScaler()
 
@@ -931,7 +952,6 @@ def train_tcn_model(
         print(f"    TCN training capped to last {MAX_TCN_TRAIN_SEQUENCES} sequences.")
 
     if len(Xtr_seq) < 200 or len(Xva_seq) < 50:
-        print("    Skipping neural_tcn: too few sequences.")
         return None, None, None
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -1008,7 +1028,7 @@ def train_tcn_model(
         logits = model(Xva_tensor)
         p = torch.sigmoid(logits).detach().cpu().numpy()
 
-    m = evaluate_probabilities("neural_tcn", yva_seq.astype(int), p)
+    m = evaluate_probabilities( yva_seq.astype(int), p)
 
     print(
         f"      AUC={m.auc:.4f} | "

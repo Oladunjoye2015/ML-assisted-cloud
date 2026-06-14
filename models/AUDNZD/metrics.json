@@ -54,7 +54,7 @@
     {
       "model_name": "extra_trees",
       "auc": 0.46842852420123293,
-      "brier": 0.26248074092991436,
+      "brier": 0.2624807409299144,
       "accuracy": 0.46808510638297873,
       "best_gate": 0.52,
       "best_margin_gate": 0.12,
@@ -88,6 +88,19 @@
       "trades_at_gate": 1644,
       "long_rate": 0.423936170212766,
       "pair_score": 0.19558165896704846,
+      "tradable": false
+    },
+    {
+      "model_name": "xgboost",
+      "auc": 0.516549586989571,
+      "brier": 0.2805516397603853,
+      "accuracy": 0.5085106382978724,
+      "best_gate": 0.6,
+      "best_margin_gate": 0.02,
+      "precision_at_gate": 0.5185537583254044,
+      "trades_at_gate": 1051,
+      "long_rate": 0.4473404255319149,
+      "pair_score": 0.2676792081618624,
       "tradable": false
     }
   ],

@@ -90,6 +90,19 @@
         "long_rate": 0.32828810020876825,
         "pair_score": 0.6728713031628796,
         "tradable": true
+      },
+      {
+        "model_name": "xgboost",
+        "auc": 0.5778737700983921,
+        "brier": 0.263138708595407,
+        "accuracy": 0.5407098121085595,
+        "best_gate": 0.7,
+        "best_margin_gate": 0.02,
+        "precision_at_gate": 0.5883361921097771,
+        "trades_at_gate": 583,
+        "long_rate": 0.31941544885177453,
+        "pair_score": 0.707520681364359,
+        "tradable": true
       }
     ],
     "feature_count": 37,
@@ -225,6 +238,19 @@
         "long_rate": 0.3193877551020408,
         "pair_score": 0.5015642720534222,
         "tradable": true
+      },
+      {
+        "model_name": "xgboost",
+        "auc": 0.5184345470074952,
+        "brier": 0.26264422752565814,
+        "accuracy": 0.5,
+        "best_gate": 0.66,
+        "best_margin_gate": 0.02,
+        "precision_at_gate": 0.5395894428152492,
+        "trades_at_gate": 341,
+        "long_rate": 0.33316326530612245,
+        "pair_score": 0.3504649313450663,
+        "tradable": false
       }
     ],
     "feature_count": 37,
@@ -325,7 +351,7 @@
       {
         "model_name": "extra_trees",
         "auc": 0.46842852420123293,
-        "brier": 0.26248074092991436,
+        "brier": 0.2624807409299144,
         "accuracy": 0.46808510638297873,
         "best_gate": 0.52,
         "best_margin_gate": 0.12,
@@ -359,6 +385,19 @@
         "trades_at_gate": 1644,
         "long_rate": 0.423936170212766,
         "pair_score": 0.19558165896704846,
+        "tradable": false
+      },
+      {
+        "model_name": "xgboost",
+        "auc": 0.516549586989571,
+        "brier": 0.2805516397603853,
+        "accuracy": 0.5085106382978724,
+        "best_gate": 0.6,
+        "best_margin_gate": 0.02,
+        "precision_at_gate": 0.5185537583254044,
+        "trades_at_gate": 1051,
+        "long_rate": 0.4473404255319149,
+        "pair_score": 0.2676792081618624,
         "tradable": false
       }
     ],
@@ -495,6 +534,19 @@
         "long_rate": 0.4334349593495935,
         "pair_score": 0.15,
         "tradable": false
+      },
+      {
+        "model_name": "xgboost",
+        "auc": 0.49522693742948887,
+        "brier": 0.2850210210945006,
+        "accuracy": 0.49898373983739835,
+        "best_gate": 0.58,
+        "best_margin_gate": 0.02,
+        "precision_at_gate": 0.5026061057334326,
+        "trades_at_gate": 1343,
+        "long_rate": 0.43191056910569103,
+        "pair_score": 0.15955572102258606,
+        "tradable": false
       }
     ],
     "feature_count": 37,
@@ -629,6 +681,19 @@
         "trades_at_gate": 450,
         "long_rate": 0.35905349794238683,
         "pair_score": 0.3446202841452254,
+        "tradable": false
+      },
+      {
+        "model_name": "xgboost",
+        "auc": 0.5120482119020222,
+        "brier": 0.26573792195647605,
+        "accuracy": 0.51440329218107,
+        "best_gate": 0.62,
+        "best_margin_gate": 0.02,
+        "precision_at_gate": 0.5228848821081831,
+        "trades_at_gate": 721,
+        "long_rate": 0.38425925925925924,
+        "pair_score": 0.2700558701027379,
         "tradable": false
       }
     ],
@@ -765,6 +830,19 @@
         "long_rate": 0.5228928199791884,
         "pair_score": 0.33489887000184837,
         "tradable": false
+      },
+      {
+        "model_name": "xgboost",
+        "auc": 0.5213664240978422,
+        "brier": 0.25914362388836326,
+        "accuracy": 0.5161290322580645,
+        "best_gate": 0.7,
+        "best_margin_gate": 0.02,
+        "precision_at_gate": 0.5487179487179488,
+        "trades_at_gate": 195,
+        "long_rate": 0.5936524453694069,
+        "pair_score": 0.3927317509260053,
+        "tradable": false
       }
     ],
     "feature_count": 37,
@@ -899,6 +977,19 @@
         "trades_at_gate": 565,
         "long_rate": 0.5944570135746606,
         "pair_score": 0.5430193688052234,
+        "tradable": true
+      },
+      {
+        "model_name": "xgboost",
+        "auc": 0.5629740963978924,
+        "brier": 0.2541520548367346,
+        "accuracy": 0.5492081447963801,
+        "best_gate": 0.7,
+        "best_margin_gate": 0.02,
+        "precision_at_gate": 0.5720164609053497,
+        "trades_at_gate": 243,
+        "long_rate": 0.5571266968325792,
+        "pair_score": 0.6029826458466263,
         "tradable": true
       }
     ],
@@ -1035,6 +1126,19 @@
         "long_rate": 0.3676639815880322,
         "pair_score": 0.557063072331726,
         "tradable": true
+      },
+      {
+        "model_name": "xgboost",
+        "auc": 0.5334400161217403,
+        "brier": 0.2601463186137556,
+        "accuracy": 0.5345224395857308,
+        "best_gate": 0.7,
+        "best_margin_gate": 0.02,
+        "precision_at_gate": 0.5487364620938628,
+        "trades_at_gate": 277,
+        "long_rate": 0.36823935558112775,
+        "pair_score": 0.42902040937605135,
+        "tradable": false
       }
     ],
     "feature_count": 37,
@@ -1170,6 +1274,19 @@
         "long_rate": 0.47950819672131145,
         "pair_score": 0.45875881827728915,
         "tradable": true
+      },
+      {
+        "model_name": "xgboost",
+        "auc": 0.5236887344012038,
+        "brier": 0.26228702148758504,
+        "accuracy": 0.5251024590163934,
+        "best_gate": 0.52,
+        "best_margin_gate": 0.08,
+        "precision_at_gate": 0.5305039787798409,
+        "trades_at_gate": 1508,
+        "long_rate": 0.5558401639344263,
+        "pair_score": 0.33291412539636134,
+        "tradable": false
       }
     ],
     "feature_count": 37,
@@ -1304,6 +1421,19 @@
         "trades_at_gate": 683,
         "long_rate": 0.5167930660888408,
         "pair_score": 0.15,
+        "tradable": false
+      },
+      {
+        "model_name": "xgboost",
+        "auc": 0.49592119005278457,
+        "brier": 0.27096930404791886,
+        "accuracy": 0.49729144095341277,
+        "best_gate": 0.52,
+        "best_margin_gate": 0.08,
+        "precision_at_gate": 0.51004851004851,
+        "trades_at_gate": 1443,
+        "long_rate": 0.504875406283857,
+        "pair_score": 0.1868445368445368,
         "tradable": false
       }
     ],
@@ -1440,6 +1570,19 @@
         "long_rate": 0.5215204024594746,
         "pair_score": 0.5890776775587674,
         "tradable": true
+      },
+      {
+        "model_name": "xgboost",
+        "auc": 0.5671134311865136,
+        "brier": 0.25079578170142286,
+        "accuracy": 0.5422023476802683,
+        "best_gate": 0.66,
+        "best_margin_gate": 0.02,
+        "precision_at_gate": 0.6286549707602339,
+        "trades_at_gate": 342,
+        "long_rate": 0.4868641699273337,
+        "pair_score": 0.8230751863470652,
+        "tradable": true
       }
     ],
     "feature_count": 37,
@@ -1574,6 +1717,19 @@
         "trades_at_gate": 175,
         "long_rate": 0.5245732022762545,
         "pair_score": 0.5658572329808699,
+        "tradable": true
+      },
+      {
+        "model_name": "xgboost",
+        "auc": 0.5425126495088257,
+        "brier": 0.25619662978861024,
+        "accuracy": 0.5302638385928609,
+        "best_gate": 0.66,
+        "best_margin_gate": 0.02,
+        "precision_at_gate": 0.5808080808080808,
+        "trades_at_gate": 396,
+        "long_rate": 0.49456802897051216,
+        "pair_score": 0.5738342448227733,
         "tradable": true
       }
     ],
@@ -1710,6 +1866,19 @@
         "long_rate": 0.5327510917030568,
         "pair_score": 0.26291427436271103,
         "tradable": false
+      },
+      {
+        "model_name": "xgboost",
+        "auc": 0.5055552575586906,
+        "brier": 0.26776275670361416,
+        "accuracy": 0.5092794759825328,
+        "best_gate": 0.52,
+        "best_margin_gate": 0.12,
+        "precision_at_gate": 0.5149253731343284,
+        "trades_at_gate": 1206,
+        "long_rate": 0.5120087336244541,
+        "pair_score": 0.22139214083527586,
+        "tradable": false
       }
     ],
     "feature_count": 37,
@@ -1845,6 +2014,19 @@
         "long_rate": 0.3740496705524582,
         "pair_score": 0.2645541535561671,
         "tradable": false
+      },
+      {
+        "model_name": "xgboost",
+        "auc": 0.5034952567675323,
+        "brier": 0.2633100790976396,
+        "accuracy": 0.503294475418145,
+        "best_gate": 0.52,
+        "best_margin_gate": 0.08,
+        "precision_at_gate": 0.5129280223619846,
+        "trades_at_gate": 1431,
+        "long_rate": 0.3806386213887481,
+        "pair_score": 0.20788851896320715,
+        "tradable": false
       }
     ],
     "feature_count": 37,
@@ -1978,6 +2160,19 @@
         "precision_at_gate": 0.4714022140221402,
         "trades_at_gate": 1084,
         "long_rate": 0.45326633165829144,
+        "pair_score": 0.15,
+        "tradable": false
+      },
+      {
+        "model_name": "xgboost",
+        "auc": 0.4548299116873528,
+        "brier": 0.2833447020068534,
+        "accuracy": 0.4728643216080402,
+        "best_gate": 0.52,
+        "best_margin_gate": 0.02,
+        "precision_at_gate": 0.4733629300776915,
+        "trades_at_gate": 1802,
+        "long_rate": 0.4311557788944724,
         "pair_score": 0.15,
         "tradable": false
       }
@@ -2115,6 +2310,19 @@
         "long_rate": 0.7323008849557522,
         "pair_score": 0.4239820067621055,
         "tradable": false
+      },
+      {
+        "model_name": "xgboost",
+        "auc": 0.5065853898580321,
+        "brier": 0.27339734478053246,
+        "accuracy": 0.5381637168141593,
+        "best_gate": 0.52,
+        "best_margin_gate": 0.12,
+        "precision_at_gate": 0.5424242424242425,
+        "trades_at_gate": 1320,
+        "long_rate": 0.7527654867256637,
+        "pair_score": 0.32531172512965223,
+        "tradable": false
       }
     ],
     "feature_count": 37,
@@ -2215,7 +2423,7 @@
       {
         "model_name": "extra_trees",
         "auc": 0.5301411621581938,
-        "brier": 0.2510267224192423,
+        "brier": 0.25102672241924223,
         "accuracy": 0.54020507285483,
         "best_gate": 0.52,
         "best_margin_gate": 0.02,
@@ -2250,6 +2458,19 @@
         "long_rate": 0.4910955207771182,
         "pair_score": 0.49404447018744724,
         "tradable": true
+      },
+      {
+        "model_name": "xgboost",
+        "auc": 0.5146126255881757,
+        "brier": 0.26486012337906006,
+        "accuracy": 0.5143011332973556,
+        "best_gate": 0.7,
+        "best_margin_gate": 0.02,
+        "precision_at_gate": 0.5454545454545454,
+        "trades_at_gate": 253,
+        "long_rate": 0.49865083648138153,
+        "pair_score": 0.36050454343119354,
+        "tradable": false
       }
     ],
     "feature_count": 37,
@@ -2385,6 +2606,19 @@
         "long_rate": 0.4136178861788618,
         "pair_score": 0.4944651794724928,
         "tradable": true
+      },
+      {
+        "model_name": "xgboost",
+        "auc": 0.5291776859504131,
+        "brier": 0.2592028223780414,
+        "accuracy": 0.5238821138211383,
+        "best_gate": 0.52,
+        "best_margin_gate": 0.08,
+        "precision_at_gate": 0.5421016005567154,
+        "trades_at_gate": 1437,
+        "long_rate": 0.4344512195121951,
+        "pair_score": 0.3919055932258626,
+        "tradable": false
       }
     ],
     "feature_count": 37,
