@@ -352,6 +352,68 @@ def make_tracking_key(
             return str(candidate)
     return f"{instrument}:{side}:{ts or utc_ts()}"
 
+def _safe_float_runtime(value, default=0.0):
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def get_atr_runtime_pips(ctx: dict) -> float:
+    """
+    Returns ATR in pips for runtime SL/TP sizing.
+    Prevents NameError when atr_runtime was not created in every branch.
+    """
+
+    # 1. Direct local variables
+    for key in (
+        "atr_runtime",
+        "atr_pips",
+        "atr14_pips",
+        "runtime_atr_pips",
+        "current_atr_pips",
+    ):
+        val = _safe_float_runtime(ctx.get(key), 0.0)
+        if val > 0:
+            return val
+
+    # 2. Look inside common dict objects
+    for obj_name in (
+        "features",
+        "feature_row",
+        "row",
+        "latest",
+        "payload",
+        "data",
+        "signal",
+        "request_json",
+    ):
+        obj = ctx.get(obj_name)
+        if isinstance(obj, dict):
+            for key in (
+                "atr_runtime",
+                "atr_pips",
+                "atr14_pips",
+                "runtime_atr_pips",
+                "current_atr_pips",
+                "atr",
+            ):
+                val = _safe_float_runtime(obj.get(key), 0.0)
+                if val > 0:
+                    return val
+
+    # 3. Recover from spread_atr if available:
+    # spread_atr = spread_pips / atr_pips
+    spread_pips = _safe_float_runtime(ctx.get("spread_pips"), 0.0)
+    spread_atr = _safe_float_runtime(ctx.get("spread_atr"), 0.0)
+
+    if spread_pips > 0 and spread_atr > 0:
+        return spread_pips / spread_atr
+
+    return 0.0
+
 # ====================================================
 # SQLITE
 # ====================================================
@@ -2162,6 +2224,49 @@ def candles_to_dataframe(result: Dict[str, Any]) -> pd.DataFrame:
     if df.empty:
         return df
     return df.dropna(subset=["time"]).sort_values("time").reset_index(drop=True)
+
+
+def rsi_runtime(close: pd.Series, period: int = 14) -> pd.Series:
+    """
+    Runtime RSI used by OANDA-built H1 feature rows and market context.
+    Kept separate from rsi() so older model bundles that expect this helper do not crash.
+    """
+    close = pd.to_numeric(close, errors="coerce")
+    delta = close.diff()
+    gain = delta.clip(lower=0.0)
+    loss = -delta.clip(upper=0.0)
+    avg_gain = gain.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+    avg_loss = loss.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    out = 100.0 - (100.0 / (1.0 + rs))
+    return out.replace([np.inf, -np.inf], np.nan).fillna(50.0)
+
+
+def atr_runtime(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """
+    Runtime ATR used by OANDA-built H1 feature rows and market context.
+    Expects mid_h, mid_l, and mid_c columns. Returns ATR in price units.
+    """
+    high = pd.to_numeric(df.get("mid_h", pd.Series(dtype=float)), errors="coerce")
+    low = pd.to_numeric(df.get("mid_l", pd.Series(dtype=float)), errors="coerce")
+    close = pd.to_numeric(df.get("mid_c", pd.Series(dtype=float)), errors="coerce")
+
+    if high.empty or low.empty or close.empty:
+        return pd.Series([0.0] * len(df), index=df.index, dtype=float)
+
+    prev_close = close.shift(1)
+    true_range = pd.concat(
+        [
+            high - low,
+            (high - prev_close).abs(),
+            (low - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+
+    out = true_range.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+    fallback = true_range.rolling(period, min_periods=1).mean()
+    return out.fillna(fallback).replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
 
 def generic_h1_training_features(df: pd.DataFrame, instrument: str) -> pd.DataFrame:
