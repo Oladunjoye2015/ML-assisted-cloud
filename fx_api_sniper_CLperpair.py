@@ -1923,25 +1923,63 @@ def _avg_auc_from_auto_meta(meta: Dict[str, Any]) -> float:
     return safe_float(meta.get("avg_auc"), 0.0)
 
 
+
 def _load_one_auto_registry_model(pair6: str, meta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    best_model = str(meta.get("best_model") or "").lower().strip()
-    features = list(meta.get("features") or meta.get("feature_order") or [])
+    """
+    Robust H1 registry loader.
+    Supports retrained sklearn/joblib pipelines saved as:
+        models/<PAIR>/best_model.pkl
+    even when best_model is extra_trees, xgboost, logistic_regression, catboost, or lightgbm.
+    """
+    best_model = str(meta.get("best_model") or meta.get("model_type") or "sklearn_pipeline").lower().strip()
+
+    features = list(
+        meta.get("features")
+        or meta.get("feature_order")
+        or meta.get("feature_cols")
+        or []
+    )
+
+    # Fallback: read feature_columns.json from pair folder
     if not features:
+        feature_file = Path(MODELS_DIR) / pair6 / "feature_columns.json"
+        if feature_file.exists():
+            try:
+                features = json.loads(feature_file.read_text())
+            except Exception as e:
+                print(f"WARNING: could not read features for {pair6}: {repr(e)}")
+
+    if not features:
+        print(f"WARNING: auto registry features missing for {pair6}")
         return None
 
-    model_path_raw = meta.get("model_path")
-    if not model_path_raw:
-        return None
+    model_path_raw = meta.get("model_path") or f"models/{pair6}/best_model.pkl"
     model_path = Path(str(model_path_raw))
-    if not model_path.is_absolute():
-        if not model_path.exists():
-            model_path = Path(MODELS_DIR) / model_path.name
-    if not model_path.exists():
-        print(f"WARNING: auto registry model missing for {pair6}: {model_path}")
+
+    candidates = []
+    if model_path.is_absolute():
+        candidates.append(model_path)
+    else:
+        candidates.append(model_path)
+        candidates.append(Path(MODELS_DIR) / pair6 / "best_model.pkl")
+        candidates.append(Path(MODELS_DIR) / model_path.name)
+
+    model_path = None
+    for c in candidates:
+        if c.exists():
+            model_path = c
+            break
+
+    if model_path is None:
+        print(f"WARNING: auto registry model missing for {pair6}: tried {[str(x) for x in candidates]}")
         return None
 
     try:
-        if best_model == "catboost":
+        # Your retrained models are sklearn/joblib pipelines.
+        if str(model_path).lower().endswith((".pkl", ".joblib")):
+            model = joblib.load(model_path)
+
+        elif best_model == "catboost":
             if CatBoostClassifier is None:
                 print(f"WARNING: CatBoost not installed; skipping {pair6}")
                 return None
@@ -1956,36 +1994,15 @@ def _load_one_auto_registry_model(pair6: str, meta: Dict[str, Any]) -> Optional[
             model = LightGBMBoosterWrapper(booster)
 
         elif best_model == "tcn":
-            if torch is None or TCNClassifier is None:
-                print(f"WARNING: PyTorch not installed; skipping TCN for {pair6}")
-                return None
-            tcn = TCNClassifier(n_features=len(features)).to(TORCH_DEVICE)
-            tcn.load_state_dict(torch.load(str(model_path), map_location=TORCH_DEVICE))
-            tcn.eval()
-
-            scaler = None
-            scaler_path_raw = meta.get("scaler_path")
-            if scaler_path_raw:
-                scaler_path = Path(str(scaler_path_raw))
-                if not scaler_path.is_absolute() and not scaler_path.exists():
-                    scaler_path = Path(MODELS_DIR) / scaler_path.name
-                if scaler_path.exists():
-                    scaler = joblib.load(scaler_path)
-            model = TCNRuntimeWrapper(pair6, tcn, scaler, features, TCN_LOOKBACK)
-
-        elif best_model in {
-            "xgboost",
-            "extra_trees",
-            "random_forest",
-            "logistic_regression",
-            "sklearn_pipeline",
-            "pipeline",
-        } or str(model_path).endswith(".pkl"):
-            model = joblib.load(model_path)
+            print(f"WARNING: TCN disabled/skipped for {pair6}")
+            return None
 
         else:
-            print(f"WARNING: unknown best_model for {pair6}: {best_model}; trying joblib load")
             model = joblib.load(model_path)
+
+        if not hasattr(model, "predict_proba"):
+            print(f"WARNING: loaded model for {pair6} has no predict_proba: {type(model)}")
+            return None
 
         avg_auc = _avg_auc_from_auto_meta(meta)
         pair_score = safe_float(meta.get("pair_score"), compute_pair_score(pair_to_instrument(pair6), avg_auc))
@@ -2011,6 +2028,7 @@ def _load_one_auto_registry_model(pair6: str, meta: Dict[str, Any]) -> Optional[
             "raw_meta": meta,
             "_bundle_path": str(model_path),
         }
+
     except Exception as e:
         print(f"ERROR loading auto registry model for {pair6}: {repr(e)}")
         return None
@@ -2018,8 +2036,58 @@ def _load_one_auto_registry_model(pair6: str, meta: Dict[str, Any]) -> Optional[
 
 def load_auto_registry_bundles(registry_path: str) -> Dict[str, Dict[str, Any]]:
     out: Dict[str, Dict[str, Any]] = {}
+
     if not AUTO_MODEL_REGISTRY_ENABLED:
+        print("Auto registry disabled.")
         return out
+
+    path = Path(registry_path)
+    if not path.exists():
+        print(f"Auto registry not found at {path}; using older joblib bundles only.")
+        return out
+
+    try:
+        registry = json.loads(path.read_text())
+    except Exception as e:
+        print(f"ERROR reading auto registry {path}: {repr(e)}")
+        return out
+
+    pairs_obj = registry.get("pairs") or registry.get("models") or registry.get("pair_list") or {}
+
+    if isinstance(pairs_obj, list):
+        iterator = []
+        for item in pairs_obj:
+            if isinstance(item, dict):
+                iterator.append((item.get("pair"), item))
+    elif isinstance(pairs_obj, dict):
+        iterator = pairs_obj.items()
+    else:
+        print(f"WARNING: unsupported registry pairs format: {type(pairs_obj)}")
+        return out
+
+    total_seen = 0
+    for pair_key, meta in iterator:
+        total_seen += 1
+        if not isinstance(meta, dict):
+            continue
+
+        pair6 = _registry_pair_to_pair6(meta.get("pair") or pair_key)
+        if not pair6:
+            print(f"WARNING: skipping unsupported registry pair: {pair_key}")
+            continue
+
+        bundle = _load_one_auto_registry_model(pair6, meta)
+        if bundle:
+            out[pair6] = bundle
+            print(
+                f"Loaded auto registry {pair6}: {bundle.get('best_model')} "
+                f"| pair_score={bundle.get('pair_score')} "
+                f"| gate={bundle.get('gate_override')}"
+            )
+
+    print(f"Auto registry load complete: seen={total_seen}, loaded={len(out)}")
+    return out
+
     path = Path(registry_path)
     if not path.exists():
         print(f"Auto registry not found at {path}; using older joblib bundles only.")
