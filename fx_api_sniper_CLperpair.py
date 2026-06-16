@@ -1976,8 +1976,15 @@ def _avg_auc_from_auto_meta(meta: Dict[str, Any]) -> float:
 
 def _load_one_auto_registry_model(pair6: str, meta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     best_model = str(meta.get("best_model") or "").lower().strip()
-    features = list(meta.get("features") or meta.get("feature_order") or [])
+    summary = meta.get("summary") or {}
+    features = list(
+        meta.get("features")
+        or meta.get("feature_order")
+        or summary.get("feature_columns")
+        or []
+    )
     if not features:
+        print(f"WARNING: auto registry has no feature columns for {pair6}")
         return None
 
     model_path_raw = meta.get("model_path")
@@ -1985,14 +1992,24 @@ def _load_one_auto_registry_model(pair6: str, meta: Dict[str, Any]) -> Optional[
         return None
     model_path = Path(str(model_path_raw))
     if not model_path.is_absolute():
-        if not model_path.exists():
-            model_path = Path(MODELS_DIR) / model_path.name
+        candidates = [
+            model_path,
+            Path(MODELS_DIR) / model_path,
+            Path(MODELS_DIR) / pair6 / model_path.name,
+            Path(MODELS_DIR) / pair6 / "best_model.pkl",
+        ]
+        model_path = next((candidate for candidate in candidates if candidate.exists()), candidates[-1])
     if not model_path.exists():
         print(f"WARNING: auto registry model missing for {pair6}: {model_path}")
         return None
 
     try:
-        if best_model == "catboost":
+        # The H1 registry saves ExtraTrees, XGBoost, LogisticRegression,
+        # LightGBM, and CatBoost as joblib .pkl files.
+        if model_path.suffix.lower() in {".pkl", ".joblib"}:
+            model = joblib.load(model_path)
+
+        elif best_model == "catboost":
             if CatBoostClassifier is None:
                 print(f"WARNING: CatBoost not installed; skipping {pair6}")
                 return None
@@ -2025,11 +2042,14 @@ def _load_one_auto_registry_model(pair6: str, meta: Dict[str, Any]) -> Optional[
             model = TCNRuntimeWrapper(pair6, tcn, scaler, features, TCN_LOOKBACK)
 
         else:
-            print(f"WARNING: unknown best_model for {pair6}: {best_model}")
-            return None
+            try:
+                model = joblib.load(model_path)
+            except Exception as load_exc:
+                print(f"WARNING: unknown/unsupported best_model for {pair6}: {best_model}; {repr(load_exc)}")
+                return None
 
         avg_auc = _avg_auc_from_auto_meta(meta)
-        pair_score = safe_float(meta.get("pair_score"), compute_pair_score(pair_to_instrument(pair6), avg_auc))
+        pair_score = safe_float(meta.get("pair_score"), 0.50)
         default_gate = safe_float(meta.get("default_gate"), DEFAULT_GATE["conf"])
         default_margin = safe_float(meta.get("default_margin"), DEFAULT_GATE["margin"])
 
