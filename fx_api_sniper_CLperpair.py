@@ -89,16 +89,16 @@ PAIR_DISAGREE_CONF: Dict[str, float] = {
 DEFAULT_DISAGREE_CONF = float(os.getenv("DEFAULT_DISAGREE_CONF", "0.62"))
 UNITS_JPY = int(os.getenv("UNITS_JPY", "1000"))
 UNITS_NON_JPY = int(os.getenv("UNITS_NON_JPY", "2000"))
-MAX_TRADES_PER_DAY_TOTAL = int(os.getenv("MAX_TRADES_PER_DAY_TOTAL", "6"))
-MAX_TRADES_PER_DAY_PER_PAIR = int(os.getenv("MAX_TRADES_PER_DAY_PER_PAIR", "3"))
-MAX_OPEN_TRADES = int(os.getenv("MAX_OPEN_TRADES", "2"))
+MAX_TRADES_PER_DAY_TOTAL = int(os.getenv("MAX_TRADES_PER_DAY_TOTAL", "3"))  # H1: reduce daily exposure
+MAX_TRADES_PER_DAY_PER_PAIR = int(os.getenv("MAX_TRADES_PER_DAY_PER_PAIR", "1"))  # H1: avoid repeat losses on same pair
+MAX_OPEN_TRADES = int(os.getenv("MAX_OPEN_TRADES", "1"))  # H1: one open trade only
 DUP_WINDOW_SECONDS = int(os.getenv("DUP_WINDOW_SECONDS", "300"))
 MAX_SPREAD_PIPS = float(os.getenv("MAX_SPREAD_PIPS", "3.5"))
 MIN_ATR_NON_JPY = float(os.getenv("MIN_ATR_NON_JPY", "0.00005"))
 MIN_ATR_JPY = float(os.getenv("MIN_ATR_JPY", "0.005"))
 USE_EQUITY_SIZING = os.getenv("USE_EQUITY_SIZING", "true").lower() == "true"
 DEFAULT_EQUITY = float(os.getenv("DEFAULT_EQUITY", "200"))
-RISK_PCT = float(os.getenv("RISK_PCT", "0.005"))
+RISK_PCT = float(os.getenv("RISK_PCT", "0.0015"))  # H1: smaller risk because losses are larger
 MIN_PAIR_SCORE_TO_TRADE = float(os.getenv("MIN_PAIR_SCORE_TO_TRADE", "0.25"))
 MIN_TRADES_FOR_PAIR_SCORING = int(os.getenv("MIN_TRADES_FOR_PAIR_SCORING", "20"))
 AUC_WEIGHT = float(os.getenv("AUC_WEIGHT", "0.80"))
@@ -107,8 +107,8 @@ MIN_UNITS_JPY = int(os.getenv("MIN_UNITS_JPY", "100"))
 MIN_UNITS_NON_JPY = int(os.getenv("MIN_UNITS_NON_JPY", "100"))
 MAX_UNITS_JPY = int(os.getenv("MAX_UNITS_JPY", "3000"))
 MAX_UNITS_NON_JPY = int(os.getenv("MAX_UNITS_NON_JPY", "5000"))
-DEFAULT_SL_ATR = float(os.getenv("DEFAULT_SL_ATR", "1.0"))
-DEFAULT_TP_ATR = float(os.getenv("DEFAULT_TP_ATR", "1.3"))
+DEFAULT_SL_ATR = float(os.getenv("DEFAULT_SL_ATR", "0.90"))  # H1: tighter initial risk unless model label overrides
+DEFAULT_TP_ATR = float(os.getenv("DEFAULT_TP_ATR", "1.40"))  # H1: improve reward/risk
 BAR_HISTORY_LEN = int(os.getenv("BAR_HISTORY_LEN", "300"))
 
 # ====================================================
@@ -185,10 +185,10 @@ DIRECTION_CONFIRM_BLOCK_STRONG_OPPOSITE_CANDLE = os.getenv("DIRECTION_CONFIRM_BL
 DIRECTION_CONFIRM_STRONG_BODY_RATIO = float(os.getenv("DIRECTION_CONFIRM_STRONG_BODY_RATIO", "0.45"))
 DIRECTION_CONFIRM_MIN_BODY_PIPS = float(os.getenv("DIRECTION_CONFIRM_MIN_BODY_PIPS", "2.0"))
 
-ENTRY_REVERSAL_GUARD_ENABLED = os.getenv("ENTRY_REVERSAL_GUARD_ENABLED", "false").lower() == "true"
+ENTRY_REVERSAL_GUARD_ENABLED = os.getenv("ENTRY_REVERSAL_GUARD_ENABLED", "true").lower() == "true"
 ENTRY_REVERSAL_GUARD_REQUIRED = os.getenv("ENTRY_REVERSAL_GUARD_REQUIRED", "false").lower() == "true"
-ENTRY_REVERSAL_MAX_ADVERSE_PIPS = float(os.getenv("ENTRY_REVERSAL_MAX_ADVERSE_PIPS", "3.0"))
-ENTRY_REVERSAL_MAX_SPREAD_PIPS = float(os.getenv("ENTRY_REVERSAL_MAX_SPREAD_PIPS", "3.0"))
+ENTRY_REVERSAL_MAX_ADVERSE_PIPS = float(os.getenv("ENTRY_REVERSAL_MAX_ADVERSE_PIPS", "4.0"))
+ENTRY_REVERSAL_MAX_SPREAD_PIPS = float(os.getenv("ENTRY_REVERSAL_MAX_SPREAD_PIPS", "3.2"))
 LIVE_PRICE_MAX_AGE_SECONDS = int(os.getenv("LIVE_PRICE_MAX_AGE_SECONDS", "20"))
 
 AI_REVIEW_ENABLED = os.getenv("AI_REVIEW_ENABLED", "false").lower() == "true"
@@ -210,6 +210,27 @@ AI_REVIEW_TIMEOUT_SECONDS = int(os.getenv("AI_REVIEW_TIMEOUT_SECONDS", "25"))
 AI_REVIEW_REQUIRE_APPROVAL = os.getenv("AI_REVIEW_REQUIRE_APPROVAL", "true").lower() == "true"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
+
+# ====================================================
+# H1 FOREX TECHNICAL REVIEW / LOSS CONTROL
+# Adapted from your M15 v17 technical-review layer for H1/H4/D.
+# It is a deterministic final confirmation after the ML gate, designed
+# to reduce large H1 losses by blocking trades fighting H1/H4/D structure.
+# ====================================================
+TECHNICAL_REVIEW_ENABLED = os.getenv("TECHNICAL_REVIEW_ENABLED", "true").lower() == "true"
+TECHNICAL_REVIEW_REQUIRED = os.getenv("TECHNICAL_REVIEW_REQUIRED", "true").lower() == "true"
+TECH_MIN_SCORE_FOR_BUY = float(os.getenv("TECH_MIN_SCORE_FOR_BUY", "62"))
+TECH_MIN_SCORE_FOR_SELL = float(os.getenv("TECH_MIN_SCORE_FOR_SELL", "62"))
+TECH_STRONG_SCORE = float(os.getenv("TECH_STRONG_SCORE", "72"))
+TECH_MIN_ALIGNED_TIMEFRAMES = int(os.getenv("TECH_MIN_ALIGNED_TIMEFRAMES", "2"))
+TECH_HARD_BLOCK_OPPOSITE_H1 = os.getenv("TECH_HARD_BLOCK_OPPOSITE_H1", "true").lower() == "true"
+TECH_HARD_BLOCK_OPPOSITE_H4 = os.getenv("TECH_HARD_BLOCK_OPPOSITE_H4", "false").lower() == "true"
+TECH_REQUIRE_H1_ALIGNMENT = os.getenv("TECH_REQUIRE_H1_ALIGNMENT", "true").lower() == "true"
+TECH_REQUIRE_H4_OR_D_ALIGNMENT = os.getenv("TECH_REQUIRE_H4_OR_D_ALIGNMENT", "true").lower() == "true"
+TECH_BLOCK_HIGH_SPREAD_ATR = os.getenv("TECH_BLOCK_HIGH_SPREAD_ATR", "true").lower() == "true"
+TECH_MAX_SPREAD_ATR = float(os.getenv("TECH_MAX_SPREAD_ATR", "0.18"))
+TECH_BLOCK_NEAR_SR = os.getenv("TECH_BLOCK_NEAR_SR", "true").lower() == "true"
+TECH_NEAR_SR_ATR_MULT = float(os.getenv("TECH_NEAR_SR_ATR_MULT", "0.35"))
 
 NEWS_EVENTS: List[Dict[str, Any]] = []
 
@@ -351,68 +372,6 @@ def make_tracking_key(
         if candidate not in (None, ""):
             return str(candidate)
     return f"{instrument}:{side}:{ts or utc_ts()}"
-
-def _safe_float_runtime(value, default=0.0):
-    try:
-        if value is None:
-            return default
-        return float(value)
-    except Exception:
-        return default
-
-
-def get_atr_runtime_pips(ctx: dict) -> float:
-    """
-    Returns ATR in pips for runtime SL/TP sizing.
-    Prevents NameError when atr_runtime was not created in every branch.
-    """
-
-    # 1. Direct local variables
-    for key in (
-        "atr_runtime",
-        "atr_pips",
-        "atr14_pips",
-        "runtime_atr_pips",
-        "current_atr_pips",
-    ):
-        val = _safe_float_runtime(ctx.get(key), 0.0)
-        if val > 0:
-            return val
-
-    # 2. Look inside common dict objects
-    for obj_name in (
-        "features",
-        "feature_row",
-        "row",
-        "latest",
-        "payload",
-        "data",
-        "signal",
-        "request_json",
-    ):
-        obj = ctx.get(obj_name)
-        if isinstance(obj, dict):
-            for key in (
-                "atr_runtime",
-                "atr_pips",
-                "atr14_pips",
-                "runtime_atr_pips",
-                "current_atr_pips",
-                "atr",
-            ):
-                val = _safe_float_runtime(obj.get(key), 0.0)
-                if val > 0:
-                    return val
-
-    # 3. Recover from spread_atr if available:
-    # spread_atr = spread_pips / atr_pips
-    spread_pips = _safe_float_runtime(ctx.get("spread_pips"), 0.0)
-    spread_atr = _safe_float_runtime(ctx.get("spread_atr"), 0.0)
-
-    if spread_pips > 0 and spread_atr > 0:
-        return spread_pips / spread_atr
-
-    return 0.0
 
 # ====================================================
 # SQLITE
@@ -1580,6 +1539,36 @@ def ai_side_aware_rule_review(context: Dict[str, Any]) -> Dict[str, Any]:
         risk += 30
         reasons.append("news_filter_failed")
 
+    # 4B. Technical review should complement AI, not compete with it.
+    # The deterministic technical layer runs first and is passed here as structured context.
+    # AI/rules add risk when the technical score is weak and reduce risk when H1/H4/D agree.
+    tech = risk_context.get("technical_review") or context.get("technical_review") or {}
+    if isinstance(tech, dict) and tech.get("enabled") is not False:
+        tech_decision = str(tech.get("decision") or "").upper()
+        tech_score = safe_float(tech.get("technical_score"), 0.0)
+        tech_min_score = safe_float(tech.get("minimum_required_score"), 0.0)
+        tech_strong_score = safe_float(tech.get("strong_score"), 68.0)
+        tech_aligned = safe_int(tech.get("aligned_timeframes"), 0)
+        tech_conflicting = safe_int(tech.get("conflicting_timeframes"), 0)
+        tech_hard_failures = tech.get("hard_failures") or []
+        if tech_decision == "BLOCK" or bool(tech_hard_failures):
+            add = 30 if bool(tech_hard_failures) else 20
+            risk += add
+            reasons.append(f"technical_review_blocked:score={tech_score:.2f},hard_failures={','.join(map(str, tech_hard_failures)) or 'none'}")
+            conflicts.append("technical_review_block")
+        elif tech_score >= tech_strong_score and tech_aligned >= 2 and tech_conflicting == 0:
+            risk -= 12
+            supports.append(f"technical_review_strong:score={tech_score:.2f},aligned={tech_aligned}")
+        elif tech_score >= tech_min_score and tech_aligned >= 1:
+            risk -= 6
+            supports.append(f"technical_review_passed:score={tech_score:.2f},aligned={tech_aligned}")
+        elif tech_min_score > 0 and tech_score < tech_min_score:
+            risk += 12
+            reasons.append(f"technical_review_weak:score={tech_score:.2f}<{tech_min_score:.2f}")
+        if tech_conflicting >= 2:
+            risk += 12
+            reasons.append(f"technical_review_multiple_tf_conflicts:{tech_conflicting}")
+
     # 5. Spread/ATR
     spread_pips = safe_float(risk_context.get("spread_pips"), safe_float(model_features.get("spread_pips"), 0.0))
     atr_pips = safe_float(model_features.get("atr_pips"), safe_float(risk_context.get("atr_pips"), 0.0))
@@ -1985,63 +1974,25 @@ def _avg_auc_from_auto_meta(meta: Dict[str, Any]) -> float:
     return safe_float(meta.get("avg_auc"), 0.0)
 
 
-
 def _load_one_auto_registry_model(pair6: str, meta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """
-    Robust H1 registry loader.
-    Supports retrained sklearn/joblib pipelines saved as:
-        models/<PAIR>/best_model.pkl
-    even when best_model is extra_trees, xgboost, logistic_regression, catboost, or lightgbm.
-    """
-    best_model = str(meta.get("best_model") or meta.get("model_type") or "sklearn_pipeline").lower().strip()
-
-    features = list(
-        meta.get("features")
-        or meta.get("feature_order")
-        or meta.get("feature_cols")
-        or []
-    )
-
-    # Fallback: read feature_columns.json from pair folder
+    best_model = str(meta.get("best_model") or "").lower().strip()
+    features = list(meta.get("features") or meta.get("feature_order") or [])
     if not features:
-        feature_file = Path(MODELS_DIR) / pair6 / "feature_columns.json"
-        if feature_file.exists():
-            try:
-                features = json.loads(feature_file.read_text())
-            except Exception as e:
-                print(f"WARNING: could not read features for {pair6}: {repr(e)}")
-
-    if not features:
-        print(f"WARNING: auto registry features missing for {pair6}")
         return None
 
-    model_path_raw = meta.get("model_path") or f"models/{pair6}/best_model.pkl"
+    model_path_raw = meta.get("model_path")
+    if not model_path_raw:
+        return None
     model_path = Path(str(model_path_raw))
-
-    candidates = []
-    if model_path.is_absolute():
-        candidates.append(model_path)
-    else:
-        candidates.append(model_path)
-        candidates.append(Path(MODELS_DIR) / pair6 / "best_model.pkl")
-        candidates.append(Path(MODELS_DIR) / model_path.name)
-
-    model_path = None
-    for c in candidates:
-        if c.exists():
-            model_path = c
-            break
-
-    if model_path is None:
-        print(f"WARNING: auto registry model missing for {pair6}: tried {[str(x) for x in candidates]}")
+    if not model_path.is_absolute():
+        if not model_path.exists():
+            model_path = Path(MODELS_DIR) / model_path.name
+    if not model_path.exists():
+        print(f"WARNING: auto registry model missing for {pair6}: {model_path}")
         return None
 
     try:
-        # Your retrained models are sklearn/joblib pipelines.
-        if str(model_path).lower().endswith((".pkl", ".joblib")):
-            model = joblib.load(model_path)
-
-        elif best_model == "catboost":
+        if best_model == "catboost":
             if CatBoostClassifier is None:
                 print(f"WARNING: CatBoost not installed; skipping {pair6}")
                 return None
@@ -2056,18 +2007,29 @@ def _load_one_auto_registry_model(pair6: str, meta: Dict[str, Any]) -> Optional[
             model = LightGBMBoosterWrapper(booster)
 
         elif best_model == "tcn":
-            print(f"WARNING: TCN disabled/skipped for {pair6}")
-            return None
+            if torch is None or TCNClassifier is None:
+                print(f"WARNING: PyTorch not installed; skipping TCN for {pair6}")
+                return None
+            tcn = TCNClassifier(n_features=len(features)).to(TORCH_DEVICE)
+            tcn.load_state_dict(torch.load(str(model_path), map_location=TORCH_DEVICE))
+            tcn.eval()
+
+            scaler = None
+            scaler_path_raw = meta.get("scaler_path")
+            if scaler_path_raw:
+                scaler_path = Path(str(scaler_path_raw))
+                if not scaler_path.is_absolute() and not scaler_path.exists():
+                    scaler_path = Path(MODELS_DIR) / scaler_path.name
+                if scaler_path.exists():
+                    scaler = joblib.load(scaler_path)
+            model = TCNRuntimeWrapper(pair6, tcn, scaler, features, TCN_LOOKBACK)
 
         else:
-            model = joblib.load(model_path)
-
-        if not hasattr(model, "predict_proba"):
-            print(f"WARNING: loaded model for {pair6} has no predict_proba: {type(model)}")
+            print(f"WARNING: unknown best_model for {pair6}: {best_model}")
             return None
 
         avg_auc = _avg_auc_from_auto_meta(meta)
-        pair_score = safe_float(meta.get("pair_score"), 0.50)
+        pair_score = safe_float(meta.get("pair_score"), compute_pair_score(pair_to_instrument(pair6), avg_auc))
         default_gate = safe_float(meta.get("default_gate"), DEFAULT_GATE["conf"])
         default_margin = safe_float(meta.get("default_margin"), DEFAULT_GATE["margin"])
 
@@ -2090,7 +2052,6 @@ def _load_one_auto_registry_model(pair6: str, meta: Dict[str, Any]) -> Optional[
             "raw_meta": meta,
             "_bundle_path": str(model_path),
         }
-
     except Exception as e:
         print(f"ERROR loading auto registry model for {pair6}: {repr(e)}")
         return None
@@ -2098,58 +2059,8 @@ def _load_one_auto_registry_model(pair6: str, meta: Dict[str, Any]) -> Optional[
 
 def load_auto_registry_bundles(registry_path: str) -> Dict[str, Dict[str, Any]]:
     out: Dict[str, Dict[str, Any]] = {}
-
     if not AUTO_MODEL_REGISTRY_ENABLED:
-        print("Auto registry disabled.")
         return out
-
-    path = Path(registry_path)
-    if not path.exists():
-        print(f"Auto registry not found at {path}; using older joblib bundles only.")
-        return out
-
-    try:
-        registry = json.loads(path.read_text())
-    except Exception as e:
-        print(f"ERROR reading auto registry {path}: {repr(e)}")
-        return out
-
-    pairs_obj = registry.get("pairs") or registry.get("models") or registry.get("pair_list") or {}
-
-    if isinstance(pairs_obj, list):
-        iterator = []
-        for item in pairs_obj:
-            if isinstance(item, dict):
-                iterator.append((item.get("pair"), item))
-    elif isinstance(pairs_obj, dict):
-        iterator = pairs_obj.items()
-    else:
-        print(f"WARNING: unsupported registry pairs format: {type(pairs_obj)}")
-        return out
-
-    total_seen = 0
-    for pair_key, meta in iterator:
-        total_seen += 1
-        if not isinstance(meta, dict):
-            continue
-
-        pair6 = _registry_pair_to_pair6(meta.get("pair") or pair_key)
-        if not pair6:
-            print(f"WARNING: skipping unsupported registry pair: {pair_key}")
-            continue
-
-        bundle = _load_one_auto_registry_model(pair6, meta)
-        if bundle:
-            out[pair6] = bundle
-            print(
-                f"Loaded auto registry {pair6}: {bundle.get('best_model')} "
-                f"| pair_score={bundle.get('pair_score')} "
-                f"| gate={bundle.get('gate_override')}"
-            )
-
-    print(f"Auto registry load complete: seen={total_seen}, loaded={len(out)}")
-    return out
-
     path = Path(registry_path)
     if not path.exists():
         print(f"Auto registry not found at {path}; using older joblib bundles only.")
@@ -2226,49 +2137,6 @@ def candles_to_dataframe(result: Dict[str, Any]) -> pd.DataFrame:
     return df.dropna(subset=["time"]).sort_values("time").reset_index(drop=True)
 
 
-def rsi_runtime(close: pd.Series, period: int = 14) -> pd.Series:
-    """
-    Runtime RSI used by OANDA-built H1 feature rows and market context.
-    Kept separate from rsi() so older model bundles that expect this helper do not crash.
-    """
-    close = pd.to_numeric(close, errors="coerce")
-    delta = close.diff()
-    gain = delta.clip(lower=0.0)
-    loss = -delta.clip(upper=0.0)
-    avg_gain = gain.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
-    avg_loss = loss.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    out = 100.0 - (100.0 / (1.0 + rs))
-    return out.replace([np.inf, -np.inf], np.nan).fillna(50.0)
-
-
-def atr_runtime(df: pd.DataFrame, period: int = 14) -> pd.Series:
-    """
-    Runtime ATR used by OANDA-built H1 feature rows and market context.
-    Expects mid_h, mid_l, and mid_c columns. Returns ATR in price units.
-    """
-    high = pd.to_numeric(df.get("mid_h", pd.Series(dtype=float)), errors="coerce")
-    low = pd.to_numeric(df.get("mid_l", pd.Series(dtype=float)), errors="coerce")
-    close = pd.to_numeric(df.get("mid_c", pd.Series(dtype=float)), errors="coerce")
-
-    if high.empty or low.empty or close.empty:
-        return pd.Series([0.0] * len(df), index=df.index, dtype=float)
-
-    prev_close = close.shift(1)
-    true_range = pd.concat(
-        [
-            high - low,
-            (high - prev_close).abs(),
-            (low - prev_close).abs(),
-        ],
-        axis=1,
-    ).max(axis=1)
-
-    out = true_range.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
-    fallback = true_range.rolling(period, min_periods=1).mean()
-    return out.fillna(fallback).replace([np.inf, -np.inf], np.nan).fillna(0.0)
-
-
 def generic_h1_training_features(df: pd.DataFrame, instrument: str) -> pd.DataFrame:
     work = df.copy()
     for col in ["mid_o", "mid_h", "mid_l", "mid_c", "volume", "spread_c"]:
@@ -2318,7 +2186,7 @@ def build_oanda_h1_feature_row(payload: Dict[str, Any], pair6: str, instrument: 
         "_model_feature_source_reason": "not_started",
         "_model_feature_granularity": MODEL_FEATURE_OANDA_GRANULARITY,
     }
-    if not (OANDA_TOKEN and OANDA_ACCOUNT_ID and OANDA_BASE_URL):
+    if not broker_ready():
         meta["_model_feature_source_used"] = "alert"
         meta["_model_feature_source_reason"] = "broker_not_ready"
         return meta
@@ -2380,10 +2248,100 @@ def build_oanda_h1_feature_row(payload: Dict[str, Any], pair6: str, instrument: 
         return meta
 
 
+
+def _direction_label_h1(value: float, eps: float = 0.0) -> str:
+    if value > eps:
+        return "bullish"
+    if value < -eps:
+        return "bearish"
+    return "neutral"
+
+
+def classify_latest_h1_candle_pattern(df: pd.DataFrame, instrument: str, lookback_trend_bars: int = 5) -> Dict[str, Any]:
+    """Conservative candlestick context for H1 technical review."""
+    if df.empty:
+        return {"pattern": "unknown", "candle_bias": "NEUTRAL", "pattern_confidence": 0, "reason": "no_candles"}
+    pip = instrument_pip_size(instrument)
+    work = df.copy()
+    last = work.iloc[-1]
+    prev = work.iloc[-2] if len(work) >= 2 else None
+    o = safe_float(last.get("mid_o"), 0.0)
+    h = safe_float(last.get("mid_h"), 0.0)
+    l = safe_float(last.get("mid_l"), 0.0)
+    c = safe_float(last.get("mid_c"), 0.0)
+    rng = max(h - l, 0.0)
+    body = abs(c - o)
+    upper = max(h - max(o, c), 0.0)
+    lower = max(min(o, c) - l, 0.0)
+    signed = c - o
+    range_pips = rng / pip if pip > 0 else 0.0
+    body_pips = body / pip if pip > 0 else 0.0
+    body_signed_pips = signed / pip if pip > 0 else 0.0
+    body_ratio = body / rng if rng > 0 else 0.0
+    upper_ratio = upper / rng if rng > 0 else 0.0
+    lower_ratio = lower / rng if rng > 0 else 0.0
+    wick_body = max(upper, lower) / max(body, 1e-12)
+
+    trend_bias = "NEUTRAL"
+    if len(work) >= lookback_trend_bars + 1:
+        prior = safe_float(work["mid_c"].iloc[-lookback_trend_bars-1], 0.0)
+        if prior > 0:
+            change = c / prior - 1.0
+            trend_bias = "BUY" if change > 0 else "SELL" if change < 0 else "NEUTRAL"
+
+    pattern, bias, confidence, reason = "neutral", "NEUTRAL", 25, "small_or_mixed_candle"
+    if prev is not None:
+        po = safe_float(prev.get("mid_o"), 0.0)
+        pc = safe_float(prev.get("mid_c"), 0.0)
+        curr_bull, curr_bear = c > o, c < o
+        prev_bull, prev_bear = pc > po, pc < po
+        engulfs = min(o, c) <= min(po, pc) and max(o, c) >= max(po, pc)
+        if curr_bull and prev_bear and engulfs and body_ratio >= 0.35:
+            pattern, bias, confidence, reason = "bullish_engulfing", "BUY", 78, "bullish_body_engulfed_prior_bearish_body"
+        elif curr_bear and prev_bull and engulfs and body_ratio >= 0.35:
+            pattern, bias, confidence, reason = "bearish_engulfing", "SELL", 78, "bearish_body_engulfed_prior_bullish_body"
+
+    if pattern == "neutral":
+        if rng <= 0 or body_ratio <= 0.10 or body_pips <= 0.5:
+            pattern, bias, confidence, reason = "doji", "NEUTRAL", 65, "very_small_body_relative_to_range"
+        elif lower >= 2.0 * max(body, 1e-12) and upper_ratio <= 0.30 and lower_ratio >= 0.45:
+            pattern = "hammer" if trend_bias in {"SELL", "NEUTRAL"} else "hanging_man"
+            bias = "BUY" if pattern == "hammer" else "SELL"
+            confidence, reason = 70, "long_lower_wick_rejection"
+        elif upper >= 2.0 * max(body, 1e-12) and lower_ratio <= 0.30 and upper_ratio >= 0.45:
+            pattern = "shooting_star" if trend_bias in {"BUY", "NEUTRAL"} else "inverted_hammer"
+            bias = "SELL" if pattern == "shooting_star" else "BUY"
+            confidence, reason = 70, "long_upper_wick_rejection"
+        elif body_ratio >= 0.65 and signed > 0:
+            pattern, bias, confidence, reason = "strong_bull", "BUY", 70, "large_bullish_body"
+        elif body_ratio >= 0.65 and signed < 0:
+            pattern, bias, confidence, reason = "strong_bear", "SELL", 70, "large_bearish_body"
+        elif prev is not None:
+            ph = safe_float(prev.get("mid_h"), 0.0); pl = safe_float(prev.get("mid_l"), 0.0)
+            if h <= ph and l >= pl:
+                pattern, bias, confidence, reason = "inside_bar", "NEUTRAL", 55, "inside_previous_candle_range"
+            elif h >= ph and l <= pl:
+                pattern, bias, confidence, reason = "outside_bar", ("BUY" if signed > 0 else "SELL" if signed < 0 else "NEUTRAL"), 60, "outside_previous_candle_range"
+    return {
+        "pattern": pattern,
+        "candle_bias": bias,
+        "pattern_confidence": int(confidence),
+        "reason": reason,
+        "trend_bias_last5": trend_bias,
+        "body_pips": float(body_pips),
+        "body_pips_signed": float(body_signed_pips),
+        "range_pips": float(range_pips),
+        "body_range_ratio": float(body_ratio),
+        "upper_wick_range_ratio": float(upper_ratio),
+        "lower_wick_range_ratio": float(lower_ratio),
+        "wick_body_ratio": float(wick_body),
+    }
+
+
 def build_external_market_context(pair6: str, instrument: str, hint_side: str, feature_row: Dict[str, Any]) -> Dict[str, Any]:
     if not MARKET_CONTEXT_ENABLED:
         return {"enabled": False, "ok": True, "reason": "market_context_disabled"}
-    if not (OANDA_TOKEN and OANDA_ACCOUNT_ID and OANDA_BASE_URL):
+    if not broker_ready():
         return {"enabled": True, "ok": not MARKET_CONTEXT_REQUIRED, "reason": "broker_not_ready_for_market_context"}
 
     summaries: Dict[str, Any] = {}
@@ -2410,6 +2368,14 @@ def build_external_market_context(pair6: str, instrument: str, hint_side: str, f
         ema200 = close.ewm(span=200, adjust=False).mean()
         atr = atr_runtime(df, 14)
         rsi = rsi_runtime(close, 14)
+        ema12 = close.ewm(span=12, adjust=False).mean()
+        ema26 = close.ewm(span=26, adjust=False).mean()
+        macd = ema12 - ema26
+        macd_signal = macd.ewm(span=9, adjust=False).mean()
+        macd_hist = macd - macd_signal
+        recent_high_20 = float(pd.to_numeric(df["mid_h"], errors="coerce").tail(20).max())
+        recent_low_20 = float(pd.to_numeric(df["mid_l"], errors="coerce").tail(20).min())
+        candle_pattern = classify_latest_h1_candle_pattern(df, instrument)
         last = df.iloc[-1]
         last_close = safe_float(last.get("mid_c"), 0.0)
         prev_close = safe_float(close.iloc[-2], last_close) if len(close) >= 2 else last_close
@@ -2445,8 +2411,19 @@ def build_external_market_context(pair6: str, instrument: str, hint_side: str, f
             "ema200_dist": float(ema200_dist),
             "rsi14": float(rsi.iloc[-1]) if np.isfinite(rsi.iloc[-1]) else 50.0,
             "atr_pips": float(atr.iloc[-1] / pip) if pip > 0 and np.isfinite(atr.iloc[-1]) else 0.0,
+            "macd_hist": float(macd_hist.iloc[-1]) if np.isfinite(macd_hist.iloc[-1]) else 0.0,
             "body_pips_signed": float(body_pips_signed),
             "range_pips": float(range_pips),
+            "recent_high_20": recent_high_20,
+            "recent_low_20": recent_low_20,
+            "distance_to_recent_high_pips": float((recent_high_20 - last_close) / pip) if pip > 0 and recent_high_20 > 0 and last_close > 0 else 0.0,
+            "distance_to_recent_low_pips": float((last_close - recent_low_20) / pip) if pip > 0 and recent_low_20 > 0 and last_close > 0 else 0.0,
+            "price_vs_ema20": _direction_label_h1(ema20_dist),
+            "price_vs_ema50": _direction_label_h1(ema50_dist),
+            "price_vs_ema200": _direction_label_h1(ema200_dist),
+            "candle_pattern": candle_pattern,
+            "last_candle_pattern": candle_pattern.get("pattern"),
+            "last_candle_bias": candle_pattern.get("candle_bias"),
             "hint_side_alignment_score": int(aligned_votes),
             "hint_side_aligned": bool(aligned_votes >= 4),
         }
@@ -2498,6 +2475,263 @@ def build_runtime_feature_row(payload: Dict[str, Any], pair6: str, instrument: s
         "_model_feature_source_reason": "alert_feature_source_selected",
     })
     return alert_row
+
+
+# ====================================================
+# H1 FOREX TECHNICAL REVIEW
+# ====================================================
+def _side_to_sign_h1(side: str) -> int:
+    side = normalize_side(side)
+    if side == "BUY":
+        return 1
+    if side == "SELL":
+        return -1
+    return 0
+
+
+def _summary_bias_for_side_h1(summary: Dict[str, Any], side: str) -> Dict[str, Any]:
+    """Score one H1/H4/D summary against BUY/SELL direction."""
+    side = normalize_side(side)
+    side_sign = _side_to_sign_h1(side)
+    if not summary or not summary.get("ok") or side_sign == 0:
+        return {"ok": False, "trend": "unknown", "score": 0, "supports": [], "conflicts": ["summary_unavailable"]}
+
+    score = 0
+    supports: List[str] = []
+    conflicts: List[str] = []
+    checks = [
+        ("ema20", safe_float(summary.get("ema20_dist"), 0.0)),
+        ("ema50", safe_float(summary.get("ema50_dist"), 0.0)),
+        ("ema200", safe_float(summary.get("ema200_dist"), 0.0)),
+        ("ret1", safe_float(summary.get("ret1"), 0.0)),
+        ("ret3", safe_float(summary.get("ret3"), 0.0)),
+        ("ret5", safe_float(summary.get("ret5"), 0.0)),
+        ("macd_hist", safe_float(summary.get("macd_hist"), 0.0)),
+        ("candle_body", safe_float(summary.get("body_pips_signed"), 0.0)),
+    ]
+    for label, value in checks:
+        sig = _sign_for_direction(float(value), 0.0)
+        if sig == side_sign:
+            score += 1
+            supports.append(label)
+        elif sig == -side_sign:
+            score -= 1
+            conflicts.append(label)
+
+    rsi14 = safe_float(summary.get("rsi14"), 50.0)
+    if side == "BUY":
+        if 45 <= rsi14 <= 68:
+            score += 1; supports.append("rsi_constructive_buy")
+        elif rsi14 < 42:
+            score -= 1; conflicts.append("rsi_weak_for_buy")
+        elif rsi14 > 75:
+            score -= 1; conflicts.append("rsi_overextended_buy")
+    elif side == "SELL":
+        if 32 <= rsi14 <= 55:
+            score += 1; supports.append("rsi_constructive_sell")
+        elif rsi14 > 60:
+            score -= 1; conflicts.append("rsi_strong_against_sell")
+        elif rsi14 < 25:
+            score -= 1; conflicts.append("rsi_oversold_sell_chase")
+
+    if score >= 3:
+        trend = "bullish" if side == "BUY" else "bearish"
+    elif score <= -3:
+        trend = "bearish" if side == "BUY" else "bullish"
+    else:
+        trend = "mixed"
+    return {"ok": True, "trend": trend, "score": int(score), "supports": supports, "conflicts": conflicts}
+
+
+def _nearest_h1_market_levels(summary: Dict[str, Any], instrument: str, side: str) -> Dict[str, Any]:
+    pip = instrument_pip_size(instrument)
+    last_close = safe_float(summary.get("last_close"), 0.0)
+    recent_high = safe_float(summary.get("recent_high_20"), 0.0)
+    recent_low = safe_float(summary.get("recent_low_20"), 0.0)
+    atr_pips = safe_float(summary.get("atr_pips"), 0.0)
+    distance_to_resistance = ((recent_high - last_close) / pip) if pip > 0 and recent_high > 0 and last_close > 0 else 0.0
+    distance_to_support = ((last_close - recent_low) / pip) if pip > 0 and recent_low > 0 and last_close > 0 else 0.0
+    risks: List[str] = []
+    supports: List[str] = []
+    near_mult = TECH_NEAR_SR_ATR_MULT
+    if side == "BUY":
+        if atr_pips > 0 and 0 < distance_to_resistance < near_mult * atr_pips:
+            risks.append(f"buy_near_h1_resistance:{distance_to_resistance:.2f}pips")
+        if atr_pips > 0 and distance_to_support > 0:
+            supports.append(f"h1_support_buffer:{distance_to_support:.2f}pips")
+    elif side == "SELL":
+        if atr_pips > 0 and 0 < distance_to_support < near_mult * atr_pips:
+            risks.append(f"sell_near_h1_support:{distance_to_support:.2f}pips")
+        if atr_pips > 0 and distance_to_resistance > 0:
+            supports.append(f"h1_resistance_buffer:{distance_to_resistance:.2f}pips")
+    return {
+        "last_close": last_close,
+        "recent_high_20": recent_high,
+        "recent_low_20": recent_low,
+        "distance_to_resistance_pips": round(float(distance_to_resistance), 4),
+        "distance_to_support_pips": round(float(distance_to_support), 4),
+        "level_supports": supports,
+        "level_risks": risks,
+    }
+
+
+def run_h1_forex_technical_review(
+    pair6: str,
+    instrument: str,
+    hint_side: str,
+    decision_prob: float,
+    feature_row: Dict[str, Any],
+    market_context: Dict[str, Any],
+    spread_atr: float = 0.0,
+) -> Dict[str, Any]:
+    """Institutional-style H1/H4/D technical confirmation after ML approval."""
+    if not TECHNICAL_REVIEW_ENABLED:
+        return {"enabled": False, "decision": "SKIPPED", "allow_trade": True, "technical_score": 100.0, "reason": "technical_review_disabled"}
+
+    side = normalize_side(hint_side)
+    if side not in {"BUY", "SELL"}:
+        return {"enabled": True, "decision": "BLOCK", "allow_trade": False, "technical_score": 0.0, "reason": "technical_review_blocked:invalid_side"}
+
+    summaries = (market_context or {}).get("summaries") or {}
+    h1 = summaries.get("H1") or {}
+    h4 = summaries.get("H4") or {}
+    d1 = summaries.get("D") or summaries.get("D1") or {}
+    tf_results = {
+        "H1": _summary_bias_for_side_h1(h1, side),
+        "H4": _summary_bias_for_side_h1(h4, side),
+        "D": _summary_bias_for_side_h1(d1, side),
+    }
+
+    score = 50.0
+    supports: List[str] = []
+    conflicts: List[str] = []
+    reasons: List[str] = []
+
+    aligned_timeframes = 0
+    conflicting_timeframes = 0
+    for tf, result in tf_results.items():
+        tf_score = safe_int(result.get("score"), 0)
+        if tf_score >= 3:
+            aligned_timeframes += 1
+            supports.append(f"{tf}_technical_alignment")
+        elif tf_score <= -3:
+            conflicting_timeframes += 1
+            conflicts.append(f"{tf}_technical_conflict")
+
+    h1_score = safe_int(tf_results["H1"].get("score"), 0)
+    h4_score = safe_int(tf_results["H4"].get("score"), 0)
+    d_score = safe_int(tf_results["D"].get("score"), 0)
+    score += h1_score * 3.5
+    score += h4_score * 2.5
+    score += d_score * 1.5
+
+    if aligned_timeframes >= 3:
+        score += 10; supports.append("all_h1_h4_d_aligned")
+    elif aligned_timeframes >= 2:
+        score += 6; supports.append("two_timeframes_aligned")
+    elif aligned_timeframes >= 1:
+        score += 2; supports.append("one_timeframe_aligned")
+
+    if conflicting_timeframes >= 3:
+        score -= 20; reasons.append("all_h1_h4_d_conflict")
+    elif conflicting_timeframes == 2:
+        score -= 13; reasons.append("two_timeframes_conflict")
+    elif conflicting_timeframes == 1:
+        score -= 6; reasons.append("one_timeframe_conflicts")
+
+    prob = safe_float(decision_prob, 0.0)
+    if prob >= AI_REVIEW_STRONG_MODEL_PROB:
+        score += 6; supports.append(f"model_probability_strong:{prob:.3f}")
+    elif prob >= AI_REVIEW_MIN_MODEL_PROB:
+        score += 2; supports.append(f"model_probability_acceptable:{prob:.3f}")
+    elif prob < 0.40:
+        score -= 12; reasons.append(f"model_probability_very_low:{prob:.3f}")
+    else:
+        score -= 6; reasons.append(f"model_probability_low:{prob:.3f}")
+
+    candle = (h1.get("candle_pattern") or {}) if isinstance(h1, dict) else {}
+    candle_bias = normalize_side(candle.get("candle_bias") or "")
+    candle_pattern = str(candle.get("pattern") or h1.get("last_candle_pattern") or "unknown")
+    body_ratio = safe_float(candle.get("body_range_ratio"), safe_float(feature_row.get("body_range_ratio"), 0.0))
+    if candle_bias == side:
+        score += 5; supports.append(f"h1_candle_supports_{side.lower()}:{candle_pattern}")
+    elif candle_bias in {"BUY", "SELL"} and candle_bias != side:
+        score -= 8; conflicts.append(f"h1_candle_conflicts:{candle_pattern}:{candle_bias}")
+    elif candle_pattern.lower() in {"doji", "inside_bar"} or body_ratio < MIN_BODY_RANGE_RATIO:
+        score -= 4; reasons.append(f"h1_indecision_or_small_body:{candle_pattern}")
+
+    atr_pips = safe_float(h1.get("atr_pips"), safe_float(feature_row.get("atr_pips"), 0.0))
+    spread_pips = safe_float(feature_row.get("spread_pips"), 0.0)
+    if spread_atr <= 0 and atr_pips > 0:
+        spread_atr = spread_pips / atr_pips
+    if spread_atr > 0:
+        if spread_atr > TECH_MAX_SPREAD_ATR:
+            score -= 12; reasons.append(f"spread_atr_too_high:{spread_atr:.3f}>{TECH_MAX_SPREAD_ATR:.3f}")
+        elif spread_atr > TECH_MAX_SPREAD_ATR * 0.75:
+            score -= 5; reasons.append(f"spread_atr_elevated:{spread_atr:.3f}")
+        else:
+            score += 3; supports.append(f"spread_atr_ok:{spread_atr:.3f}")
+
+    levels = _nearest_h1_market_levels(h1, instrument, side)
+    if levels.get("level_supports"):
+        score += 2; supports.extend(levels.get("level_supports") or [])
+    if TECH_BLOCK_NEAR_SR and levels.get("level_risks"):
+        score -= 7; reasons.extend(levels.get("level_risks") or [])
+
+    min_score = TECH_MIN_SCORE_FOR_BUY if side == "BUY" else TECH_MIN_SCORE_FOR_SELL
+    hard_failures: List[str] = []
+    if TECH_REQUIRE_H1_ALIGNMENT and h1_score <= -3:
+        hard_failures.append("h1_technical_conflict")
+    if TECH_HARD_BLOCK_OPPOSITE_H1 and h1_score <= -5:
+        hard_failures.append("strong_h1_opposite_technical_structure")
+    if TECH_HARD_BLOCK_OPPOSITE_H4 and h4_score <= -5:
+        hard_failures.append("strong_h4_opposite_technical_structure")
+    if TECH_REQUIRE_H4_OR_D_ALIGNMENT and h4_score < 3 and d_score < 3:
+        hard_failures.append("neither_h4_nor_daily_aligns")
+    if aligned_timeframes < TECH_MIN_ALIGNED_TIMEFRAMES:
+        hard_failures.append(f"not_enough_aligned_timeframes:{aligned_timeframes}<{TECH_MIN_ALIGNED_TIMEFRAMES}")
+    if TECH_BLOCK_HIGH_SPREAD_ATR and spread_atr > TECH_MAX_SPREAD_ATR:
+        hard_failures.append(f"spread_atr_hard_block:{spread_atr:.3f}>{TECH_MAX_SPREAD_ATR:.3f}")
+
+    score = round(max(0.0, min(100.0, score)), 2)
+    allow_trade = bool(score >= min_score and not hard_failures)
+    decision = "PASS" if allow_trade else "BLOCK"
+    if allow_trade:
+        reason = "technical_review_passed"
+    elif score < min_score:
+        reason = f"technical_review_blocked:score={score:.2f}<{min_score:.2f}"
+    else:
+        reason = "technical_review_blocked:" + ";".join(hard_failures)
+
+    return {
+        "enabled": True,
+        "decision": decision,
+        "allow_trade": allow_trade,
+        "technical_score": score,
+        "minimum_required_score": min_score,
+        "strong_score": TECH_STRONG_SCORE,
+        "reason": reason,
+        "pair": pair6,
+        "instrument": instrument,
+        "side_reviewed": side,
+        "timeframes": tf_results,
+        "aligned_timeframes": aligned_timeframes,
+        "conflicting_timeframes": conflicting_timeframes,
+        "h1_score_raw": h1_score,
+        "h4_score_raw": h4_score,
+        "daily_score_raw": d_score,
+        "spread_atr": round(float(spread_atr), 4) if spread_atr else 0.0,
+        "atr_pips": atr_pips,
+        "spread_pips": spread_pips,
+        "support_resistance_context": levels,
+        "latest_candle_pattern": candle_pattern,
+        "latest_candle_bias": candle_bias or "NEUTRAL",
+        "supports": supports[:12],
+        "conflicts": conflicts[:12],
+        "risk_reasons": reasons[:12],
+        "hard_failures": hard_failures,
+    }
+
 
 # ====================================================
 # PAYLOAD MODELS
@@ -3035,25 +3269,25 @@ def predict(p: TVPayload):
 
         noise_passed, noise_reason, noise_metrics = runtime_noise_filter(payload, feature_row, instrument, side)
         if not noise_passed:
-            out = make_out(decision="NONE", why=noise_reason, would_order=False, units=None, units_signed=None, sl_pips=None, tp_pips=None, sl_price=None, tp_price=None, decision_source="noise_filter_block", signal_id=fingerprint, noise_filter_reason=noise_reason, **stale_metrics, **noise_metrics, **base)
+            out = make_out(decision="NONE", why=noise_reason, would_order=False, units=None, units_signed=None, sl_pips=None, tp_pips=None, sl_price=None, tp_price=None, decision_source="noise_filter_block", signal_id=fingerprint, noise_filter_passed=False, noise_filter_reason=noise_reason, **stale_metrics, **noise_metrics, **base)
             write_audit_row(out)
             return out
 
         news_passed, news_reason, news_metrics = runtime_news_filter(pair6, payload)
         if not news_passed:
-            out = make_out(decision="NONE", why=news_reason, would_order=False, units=None, units_signed=None, sl_pips=None, tp_pips=None, sl_price=None, tp_price=None, decision_source="news_filter_block", signal_id=fingerprint, noise_filter_reason=noise_reason, **stale_metrics, **noise_metrics, **news_metrics, **base)
+            out = make_out(decision="NONE", why=news_reason, would_order=False, units=None, units_signed=None, sl_pips=None, tp_pips=None, sl_price=None, tp_price=None, decision_source="news_filter_block", signal_id=fingerprint, noise_filter_passed=True, noise_filter_reason=noise_reason, **stale_metrics, **noise_metrics, **news_metrics, **base)
             write_audit_row(out)
             return out
 
         direction_passed, direction_reason, direction_metrics = direction_consensus_guard(payload, feature_row, instrument, side)
         if not direction_passed:
-            out = make_out(decision="NONE", why=direction_reason, would_order=False, units=None, units_signed=None, sl_pips=None, tp_pips=None, sl_price=None, tp_price=None, decision_source="direction_confirmation_block", signal_id=fingerprint, noise_filter_reason=noise_reason, news_filter_reason=news_reason, **stale_metrics, **noise_metrics, **news_metrics, **direction_metrics, **base)
+            out = make_out(decision="NONE", why=direction_reason, would_order=False, units=None, units_signed=None, sl_pips=None, tp_pips=None, sl_price=None, tp_price=None, decision_source="direction_confirmation_block", signal_id=fingerprint, noise_filter_passed=True, noise_filter_reason=noise_reason, news_filter_reason=news_reason, **stale_metrics, **noise_metrics, **news_metrics, **direction_metrics, **base)
             write_audit_row(out)
             return out
 
         entry_passed, entry_reason, entry_metrics = entry_reversal_guard(payload, feature_row, instrument, side)
         if not entry_passed:
-            out = make_out(decision="NONE", why=entry_reason, would_order=False, units=None, units_signed=None, sl_pips=None, tp_pips=None, sl_price=None, tp_price=None, decision_source="entry_reversal_guard_block", signal_id=fingerprint, noise_filter_reason=noise_reason, news_filter_reason=news_reason, **stale_metrics, **noise_metrics, **news_metrics, **direction_metrics, **entry_metrics, **base)
+            out = make_out(decision="NONE", why=entry_reason, would_order=False, units=None, units_signed=None, sl_pips=None, tp_pips=None, sl_price=None, tp_price=None, decision_source="entry_reversal_guard_block", signal_id=fingerprint, noise_filter_passed=True, noise_filter_reason=noise_reason, news_filter_reason=news_reason, **stale_metrics, **noise_metrics, **news_metrics, **direction_metrics, **entry_metrics, **base)
             write_audit_row(out)
             return out
 
@@ -3073,6 +3307,60 @@ def predict(p: TVPayload):
             return out
 
         would_order = (conf >= conf_gate) and (margin >= margin_gate)
+
+        technical_review = {
+            "enabled": TECHNICAL_REVIEW_ENABLED,
+            "decision": "SKIPPED",
+            "allow_trade": True,
+            "technical_score": 0.0,
+            "reason": "technical_review_not_run_below_model_gate" if not would_order else "technical_review_not_run",
+        }
+        if would_order and TECHNICAL_REVIEW_ENABLED:
+            spread_atr_runtime = safe_float(payload.get("spread_atr"), 0.0)
+            technical_review = run_h1_forex_technical_review(
+                pair6=pair6,
+                instrument=instrument,
+                hint_side=side,
+                decision_prob=conf,
+                feature_row=feature_row,
+                market_context=market_context,
+                spread_atr=spread_atr_runtime,
+            )
+            if TECHNICAL_REVIEW_REQUIRED and not bool(technical_review.get("allow_trade", False)):
+                out = make_out(
+                    decision="NONE",
+                    why=f"Technical review blocked: {technical_review.get('reason')}",
+                    would_order=False,
+                    units=None,
+                    units_signed=None,
+                    sl_pips=None,
+                    tp_pips=None,
+                    sl_price=None,
+                    tp_price=None,
+                    decision_source="technical_review_block",
+                    signal_id=fingerprint,
+                    noise_filter_passed=True,
+                    noise_filter_reason=noise_reason,
+                    news_filter_reason=news_reason,
+                    technical_review_enabled=TECHNICAL_REVIEW_ENABLED,
+                    technical_review_decision=technical_review.get("decision"),
+                    technical_review_score=technical_review.get("technical_score"),
+                    technical_review_min_score=technical_review.get("minimum_required_score"),
+                    technical_review_reason=technical_review.get("reason"),
+                    technical_aligned_timeframes=technical_review.get("aligned_timeframes"),
+                    technical_conflicting_timeframes=technical_review.get("conflicting_timeframes"),
+                    technical_h1_score=technical_review.get("h1_score_raw"),
+                    technical_h4_score=technical_review.get("h4_score_raw"),
+                    technical_daily_score=technical_review.get("daily_score_raw"),
+                    technical_hard_failures=technical_review.get("hard_failures"),
+                    technical_supports=technical_review.get("supports"),
+                    technical_conflicts=technical_review.get("conflicts"),
+                    technical_risk_reasons=technical_review.get("risk_reasons"),
+                    **guard_metrics,
+                    **base,
+                )
+                write_audit_row(out)
+                return out
 
         if would_order and is_duplicate_signal(pair6, fingerprint):
             out = make_out(decision="NONE", why=f"Duplicate signal blocked for {instrument}", would_order=False, units=None, units_signed=None, sl_pips=None, tp_pips=None, sl_price=None, tp_price=None, **base)
@@ -3132,7 +3420,7 @@ def predict(p: TVPayload):
                 "external_market_context": market_context,
                 "market_context": market_context,
                 "payload_market": {k: payload.get(k) for k in ["mid_o","mid_h","mid_l","mid_c","ema20","ema50","ema200","rsi14","adx14","atr14","macdh","spread_pips","spread_atr","trend_regime","vol_regime"]},
-                "risk_context": {**guard_metrics, "spread_pips": payload.get("spread_pips"), "spread_atr": payload.get("spread_atr"), "atr_pips": feature_row.get("atr_pips")},
+                "risk_context": {**guard_metrics, "spread_pips": payload.get("spread_pips"), "spread_atr": payload.get("spread_atr"), "atr_pips": feature_row.get("atr_pips"), "technical_review": technical_review},
                 "guards": guard_metrics,
                 "risk": {"max_open_trades": MAX_OPEN_TRADES, "max_trades_day_total": MAX_TRADES_PER_DAY_TOTAL, "max_trades_day_pair": MAX_TRADES_PER_DAY_PER_PAIR, "equity_used": equity_used},
             }
@@ -3162,6 +3450,7 @@ def predict(p: TVPayload):
             sl_price=sl_price,
             tp_price=tp_price,
             signal_id=fingerprint,
+            noise_filter_passed=True,
             noise_filter_reason=noise_reason,
             news_filter_reason=news_reason,
             ai_review_enabled=AI_REVIEW_ENABLED,
@@ -3173,6 +3462,20 @@ def predict(p: TVPayload):
             ai_aligned_timeframes=ai_review.get("aligned_timeframes"),
             ai_conflicting_timeframes=ai_review.get("conflicting_timeframes"),
             ai_timeframe_trends=ai_review.get("timeframe_trends"),
+            technical_review_enabled=TECHNICAL_REVIEW_ENABLED,
+            technical_review_decision=technical_review.get("decision"),
+            technical_review_score=technical_review.get("technical_score"),
+            technical_review_min_score=technical_review.get("minimum_required_score"),
+            technical_review_reason=technical_review.get("reason"),
+            technical_aligned_timeframes=technical_review.get("aligned_timeframes"),
+            technical_conflicting_timeframes=technical_review.get("conflicting_timeframes"),
+            technical_h1_score=technical_review.get("h1_score_raw"),
+            technical_h4_score=technical_review.get("h4_score_raw"),
+            technical_daily_score=technical_review.get("daily_score_raw"),
+            technical_hard_failures=technical_review.get("hard_failures"),
+            technical_supports=technical_review.get("supports"),
+            technical_conflicts=technical_review.get("conflicts"),
+            technical_risk_reasons=technical_review.get("risk_reasons"),
             **guard_metrics,
             **base,
         )
@@ -3368,6 +3671,18 @@ def health():
         "ai_review_strong_model_prob": AI_REVIEW_STRONG_MODEL_PROB,
         "ai_review_max_spread_atr": AI_REVIEW_MAX_SPREAD_ATR,
         "ai_review_fallback_to_rules": AI_REVIEW_FALLBACK_TO_RULES,
+        "technical_review_enabled": TECHNICAL_REVIEW_ENABLED,
+        "technical_review_required": TECHNICAL_REVIEW_REQUIRED,
+        "tech_min_score_for_buy": TECH_MIN_SCORE_FOR_BUY,
+        "tech_min_score_for_sell": TECH_MIN_SCORE_FOR_SELL,
+        "tech_min_aligned_timeframes": TECH_MIN_ALIGNED_TIMEFRAMES,
+        "tech_require_h1_alignment": TECH_REQUIRE_H1_ALIGNMENT,
+        "tech_require_h4_or_d_alignment": TECH_REQUIRE_H4_OR_D_ALIGNMENT,
+        "tech_max_spread_atr": TECH_MAX_SPREAD_ATR,
+        "risk_pct": RISK_PCT,
+        "max_open_trades": MAX_OPEN_TRADES,
+        "max_trades_per_day_total": MAX_TRADES_PER_DAY_TOTAL,
+        "max_trades_per_day_per_pair": MAX_TRADES_PER_DAY_PER_PAIR,
     }
 
 @app.get("/stats")
