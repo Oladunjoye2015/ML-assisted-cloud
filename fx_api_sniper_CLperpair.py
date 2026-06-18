@@ -2206,7 +2206,7 @@ def build_oanda_h1_feature_row(payload: Dict[str, Any], pair6: str, instrument: 
         "_model_feature_source_reason": "not_started",
         "_model_feature_granularity": MODEL_FEATURE_OANDA_GRANULARITY,
     }
-    if not broker_ready():
+    if not broker_can_close():
         meta["_model_feature_source_used"] = "alert"
         meta["_model_feature_source_reason"] = "broker_not_ready"
         return meta
@@ -2361,7 +2361,7 @@ def classify_latest_h1_candle_pattern(df: pd.DataFrame, instrument: str, lookbac
 def build_external_market_context(pair6: str, instrument: str, hint_side: str, feature_row: Dict[str, Any]) -> Dict[str, Any]:
     if not MARKET_CONTEXT_ENABLED:
         return {"enabled": False, "ok": True, "reason": "market_context_disabled"}
-    if not broker_ready():
+    if not broker_can_close():
         return {"enabled": True, "ok": not MARKET_CONTEXT_REQUIRED, "reason": "broker_not_ready_for_market_context"}
 
     summaries: Dict[str, Any] = {}
