@@ -600,6 +600,31 @@ def adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> 
     adx_val = dx.ewm(alpha=1 / period, adjust=False).mean()
     return adx_val, plus_di, minus_di
 
+
+# Runtime indicator aliases used by the H1 OANDA feature/context builder.
+# The base server defines rsi() and atr(); the hybrid patch expects rsi_runtime()
+# and atr_runtime(), so these wrappers prevent NameError during prediction.
+def rsi_runtime(close: pd.Series, period: int = 14) -> pd.Series:
+    return rsi(close, period)
+
+def atr_runtime(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    if isinstance(df, pd.DataFrame):
+        if {"mid_h", "mid_l", "mid_c"}.issubset(df.columns):
+            return atr(
+                pd.to_numeric(df["mid_h"], errors="coerce"),
+                pd.to_numeric(df["mid_l"], errors="coerce"),
+                pd.to_numeric(df["mid_c"], errors="coerce"),
+                period,
+            )
+        if {"high", "low", "close"}.issubset(df.columns):
+            return atr(
+                pd.to_numeric(df["high"], errors="coerce"),
+                pd.to_numeric(df["low"], errors="coerce"),
+                pd.to_numeric(df["close"], errors="coerce"),
+                period,
+            )
+    return pd.Series([0.0])
+
 def update_bar_history(pair6: str, payload: Dict[str, Any]) -> pd.DataFrame:
     q = _bar_history.setdefault(pair6, deque(maxlen=BAR_HISTORY_LEN))
     row = {
