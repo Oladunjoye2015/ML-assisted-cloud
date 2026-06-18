@@ -3314,25 +3314,25 @@ def predict(p: TVPayload):
 
         noise_passed, noise_reason, noise_metrics = runtime_noise_filter(payload, feature_row, instrument, side)
         if not noise_passed:
-            out = make_out(decision="NONE", why=noise_reason, would_order=False, units=None, units_signed=None, sl_pips=None, tp_pips=None, sl_price=None, tp_price=None, decision_source="noise_filter_block", signal_id=fingerprint, noise_filter_passed=False, noise_filter_reason=noise_reason, **stale_metrics, **noise_metrics, **base)
+            out = make_out(decision="NONE", why=noise_reason, would_order=False, units=None, units_signed=None, sl_pips=None, tp_pips=None, sl_price=None, tp_price=None, decision_source="noise_filter_block", signal_id=fingerprint, noise_filter_reason=noise_reason, **stale_metrics, **noise_metrics, **base)
             write_audit_row(out)
             return out
 
         news_passed, news_reason, news_metrics = runtime_news_filter(pair6, payload)
         if not news_passed:
-            out = make_out(decision="NONE", why=news_reason, would_order=False, units=None, units_signed=None, sl_pips=None, tp_pips=None, sl_price=None, tp_price=None, decision_source="news_filter_block", signal_id=fingerprint, noise_filter_passed=True, noise_filter_reason=noise_reason, **stale_metrics, **noise_metrics, **news_metrics, **base)
+            out = make_out(decision="NONE", why=news_reason, would_order=False, units=None, units_signed=None, sl_pips=None, tp_pips=None, sl_price=None, tp_price=None, decision_source="news_filter_block", signal_id=fingerprint, noise_filter_reason=noise_reason, **stale_metrics, **noise_metrics, **news_metrics, **base)
             write_audit_row(out)
             return out
 
         direction_passed, direction_reason, direction_metrics = direction_consensus_guard(payload, feature_row, instrument, side)
         if not direction_passed:
-            out = make_out(decision="NONE", why=direction_reason, would_order=False, units=None, units_signed=None, sl_pips=None, tp_pips=None, sl_price=None, tp_price=None, decision_source="direction_confirmation_block", signal_id=fingerprint, noise_filter_passed=True, noise_filter_reason=noise_reason, news_filter_reason=news_reason, **stale_metrics, **noise_metrics, **news_metrics, **direction_metrics, **base)
+            out = make_out(decision="NONE", why=direction_reason, would_order=False, units=None, units_signed=None, sl_pips=None, tp_pips=None, sl_price=None, tp_price=None, decision_source="direction_confirmation_block", signal_id=fingerprint, noise_filter_reason=noise_reason, news_filter_reason=news_reason, **stale_metrics, **noise_metrics, **news_metrics, **direction_metrics, **base)
             write_audit_row(out)
             return out
 
         entry_passed, entry_reason, entry_metrics = entry_reversal_guard(payload, feature_row, instrument, side)
         if not entry_passed:
-            out = make_out(decision="NONE", why=entry_reason, would_order=False, units=None, units_signed=None, sl_pips=None, tp_pips=None, sl_price=None, tp_price=None, decision_source="entry_reversal_guard_block", signal_id=fingerprint, noise_filter_passed=True, noise_filter_reason=noise_reason, news_filter_reason=news_reason, **stale_metrics, **noise_metrics, **news_metrics, **direction_metrics, **entry_metrics, **base)
+            out = make_out(decision="NONE", why=entry_reason, would_order=False, units=None, units_signed=None, sl_pips=None, tp_pips=None, sl_price=None, tp_price=None, decision_source="entry_reversal_guard_block", signal_id=fingerprint, noise_filter_reason=noise_reason, news_filter_reason=news_reason, **stale_metrics, **noise_metrics, **news_metrics, **direction_metrics, **entry_metrics, **base)
             write_audit_row(out)
             return out
 
