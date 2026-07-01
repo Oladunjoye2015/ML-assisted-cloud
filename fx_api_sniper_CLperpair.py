@@ -56,6 +56,15 @@ AUTO_CLOSE_ALLOW_POSITION_FALLBACK = os.getenv("AUTO_CLOSE_ALLOW_POSITION_FALLBA
 # position is never held materially longer than intended, while still respecting a
 # smaller configured interval if the operator sets one.
 AUTO_CLOSE_INTERVAL_SECONDS = max(30, min(AUTO_CLOSE_CHECK_SECONDS, (MAX_HOLD_MINUTES * 60) // 4))
+# AUDIT FIX (H2): a /predict recommendation reserves a daily/open slot as "pending". If
+# no fill is confirmed via /trade_event within this window, the reservation expires and
+# the slot is freed — so a recommendation that never becomes a real order can't silently
+# consume the day's cap. Set to roughly how long your client takes to place + confirm.
+RESERVATION_TTL_SECONDS = int(os.getenv("RESERVATION_TTL_SECONDS", "300"))
+# H2: log-only by default. When true, the reconciliation worker will also correct the
+# tracked open-trade set to match the broker (never places/closes orders itself).
+BROKER_RECONCILE_ENABLED = os.getenv("BROKER_RECONCILE_ENABLED", "true").lower() == "true"
+BROKER_RECONCILE_AUTOCORRECT = os.getenv("BROKER_RECONCILE_AUTOCORRECT", "false").lower() == "true"
 
 OANDA_TOKEN = os.getenv("OANDA_TOKEN", "").strip()
 OANDA_ACCOUNT_ID = os.getenv("OANDA_ACCOUNT_ID", "").strip()
@@ -266,7 +275,8 @@ _STATE_LOCK = threading.RLock()
 _recent_signals: Dict[str, deque] = {}
 _bar_history: Dict[str, deque] = {pair6: deque(maxlen=BAR_HISTORY_LEN) for pair6 in PAIR_MAP}
 _tcn_feature_history: Dict[str, deque] = {}
-_trade_count_today: Dict[str, int] = {}
+_trade_count_today: Dict[str, int] = {}          # CONFIRMED fills today, per pair (H2)
+_pending_reservations: Dict[str, deque] = {}     # pair6 -> deque[(ts_unix, fingerprint)] (H2)
 _trade_day = dt.datetime.now(dt.timezone.utc).date()
 _open_trade_ids: set[str] = set()
 _open_trade_meta: Dict[str, Dict[str, Any]] = {}
@@ -512,29 +522,74 @@ def _check_daily_reset() -> None:
     if today != _trade_day:
         _trade_day = today
         _trade_count_today.clear()
+        _pending_reservations.clear()
+
+def _prune_pending() -> None:
+    # Assumes caller holds _STATE_LOCK. Drop reservations with no confirmed fill within TTL.
+    tnow = now_unix()
+    for pair6, q in list(_pending_reservations.items()):
+        while q and (tnow - q[0][0] > RESERVATION_TTL_SECONDS):
+            q.popleft()
+        if not q:
+            _pending_reservations.pop(pair6, None)
+
+def _pending_count(pair6: Optional[str] = None) -> int:
+    # Assumes caller holds _STATE_LOCK and _prune_pending() was just called.
+    if pair6 is not None:
+        return len(_pending_reservations.get(pair6, ()))
+    return sum(len(q) for q in _pending_reservations.values())
 
 def trades_today(pair6: str) -> int:
+    # EFFECTIVE count used for gating = confirmed fills + still-active reservations (H2).
     with _STATE_LOCK:
-        _check_daily_reset()
-        return _trade_count_today.get(pair6, 0)
+        _check_daily_reset(); _prune_pending()
+        return _trade_count_today.get(pair6, 0) + _pending_count(pair6)
 
 def trades_today_total() -> int:
+    with _STATE_LOCK:
+        _check_daily_reset(); _prune_pending()
+        return sum(_trade_count_today.values()) + _pending_count()
+
+def confirmed_trades_today_total() -> int:
+    # Reporting: real fills only, excluding pending reservations.
     with _STATE_LOCK:
         _check_daily_reset()
         return sum(_trade_count_today.values())
 
-def inc_trade(pair6: str) -> None:
+def confirm_fill(pair6: Optional[str], fingerprint: Optional[str] = None) -> None:
+    # AUDIT FIX (H2): a real fill (reported via /trade_event OPEN) is the source of truth.
+    # Increment the confirmed counter and retire one matching pending reservation.
+    if not pair6:
+        return
     with _STATE_LOCK:
-        _check_daily_reset()
+        _check_daily_reset(); _prune_pending()
         _trade_count_today[pair6] = _trade_count_today.get(pair6, 0) + 1
+        q = _pending_reservations.get(pair6)
+        if q:
+            if fingerprint is not None:
+                for i, (_, fp) in enumerate(q):
+                    if fp == fingerprint:
+                        del q[i]
+                        break
+                else:
+                    q.popleft()
+            else:
+                q.popleft()
+            if not q:
+                _pending_reservations.pop(pair6, None)
 
 def current_open_trade_count() -> int:
     with _STATE_LOCK:
         return len(_open_trade_ids)
 
-def can_open_trade() -> bool:
+def effective_open_trade_count() -> int:
+    # Actual open fills + pending reservations not yet filled (H2).
     with _STATE_LOCK:
-        return len(_open_trade_ids) < MAX_OPEN_TRADES
+        _prune_pending()
+        return len(_open_trade_ids) + _pending_count()
+
+def can_open_trade() -> bool:
+    return effective_open_trade_count() < MAX_OPEN_TRADES
 
 def note_trade_opened(tracking_key: Optional[str]) -> None:
     if tracking_key:
@@ -596,25 +651,27 @@ def remember_signal(pair6: str, fingerprint: str) -> None:
 
 
 def reserve_trade_slot(pair6: str, fingerprint: str) -> Optional[str]:
-    """Atomically re-check the trade caps and, if all pass, record the signal and
-    increment the daily counter — all under one lock so the check-and-increment cannot
-    interleave with a concurrent /predict (AUDIT FIX C4). Returns None on success, or a
-    short reason string if the slot could not be reserved (e.g. lost a race after the
-    earlier fast-path checks passed). The earlier per-cap checks in /predict still run
-    first to produce specific audit messages; this is the authoritative commit."""
+    """Atomically re-check the trade caps and, if all pass, record the signal and add a
+    PENDING reservation — all under one lock so the check-and-reserve cannot interleave
+    with a concurrent /predict (AUDIT FIX C4). Caps are evaluated on the EFFECTIVE count
+    (confirmed fills + still-active reservations, AUDIT FIX H2), so recommendations can't
+    over-subscribe the day's budget while orders are in flight. The reservation is later
+    retired by confirm_fill() when /trade_event reports the OPEN, or it simply expires
+    after RESERVATION_TTL_SECONDS if the order never fills. Returns None on success or a
+    short reason string if the slot could not be reserved."""
     with _STATE_LOCK:
-        _check_daily_reset()
+        _check_daily_reset(); _prune_pending()
         if is_duplicate_signal(pair6, fingerprint):
             return "duplicate_signal"
-        if sum(_trade_count_today.values()) >= MAX_TRADES_PER_DAY_TOTAL:
+        if sum(_trade_count_today.values()) + _pending_count() >= MAX_TRADES_PER_DAY_TOTAL:
             return "daily_total_cap"
-        if _trade_count_today.get(pair6, 0) >= MAX_TRADES_PER_DAY_PER_PAIR:
+        if _trade_count_today.get(pair6, 0) + _pending_count(pair6) >= MAX_TRADES_PER_DAY_PER_PAIR:
             return "daily_pair_cap"
-        if len(_open_trade_ids) >= MAX_OPEN_TRADES:
+        if len(_open_trade_ids) + _pending_count() >= MAX_OPEN_TRADES:
             return "open_trade_cap"
-        # Commit.
+        # Reserve (pending): record the dedup signal and hold a slot until fill or TTL.
         _recent_signals.setdefault(pair6, deque()).append((now_unix(), fingerprint))
-        _trade_count_today[pair6] = _trade_count_today.get(pair6, 0) + 1
+        _pending_reservations.setdefault(pair6, deque()).append((now_unix(), fingerprint))
         return None
 
 # ====================================================
@@ -3063,6 +3120,51 @@ def close_open_trade_meta(meta: Dict[str, Any]) -> Dict[str, Any]:
         "attempts": attempts,
     }
 
+def reconcile_open_trades_with_broker() -> Dict[str, Any]:
+    """AUDIT FIX (H2): the tracked open-trade set only updates when /trade_event is
+    delivered; a missed callback silently desyncs it from the real account. Poll OANDA's
+    open trades and compare. Log-only by default; if BROKER_RECONCILE_AUTOCORRECT is set,
+    drop tracked trades the broker no longer shows (never opens/closes anything itself)."""
+    if not BROKER_RECONCILE_ENABLED or not broker_can_close():
+        return {"ok": False, "reason": "disabled_or_no_creds"}
+
+    res = oanda_request("GET", f"/v3/accounts/{OANDA_ACCOUNT_ID}/openTrades")
+    if not res.get("ok"):
+        return {"ok": False, "reason": "broker_query_failed", "error": res.get("error")}
+
+    broker_trades = (res.get("data") or {}).get("trades") or []
+    broker_ids = {str(t.get("id")) for t in broker_trades if t.get("id") is not None}
+    broker_count = len(broker_ids)
+
+    with _STATE_LOCK:
+        tracked_count = len(_open_trade_ids)
+        stale_meta = [
+            k for k, m in _open_trade_meta.items()
+            if str(m.get("broker_trade_id") or "") and str(m.get("broker_trade_id")) not in broker_ids
+        ]
+        corrected = 0
+        if BROKER_RECONCILE_AUTOCORRECT:
+            for k in stale_meta:
+                _open_trade_meta.pop(k, None)
+                _open_trade_ids.discard(str(k))
+                corrected += 1
+
+    if broker_count != tracked_count or stale_meta:
+        write_audit_row({
+            "ts": utc_ts(), "pair": "", "instrument": "", "symbol": "", "hint_side": "",
+            "model_version": "reconcile", "avg_auc": None, "pair_score": None,
+            "equity_used": None, "trend_regime": None, "vol_regime": None,
+            "spread_pips": None, "spread_atr": None, "confidence": 0, "side_prob": 0,
+            "p_up": 0, "margin": 0, "decision": "NONE", "would_order": False,
+            "units": None, "units_signed": None, "sl_pips": None, "tp_pips": None,
+            "sl_price": None, "tp_price": None,
+            "why": (f"RECONCILE | broker_open={broker_count} tracked_open={tracked_count} "
+                    f"stale_tracked={len(stale_meta)} autocorrected={corrected if BROKER_RECONCILE_AUTOCORRECT else 0}"),
+        })
+    return {"ok": True, "broker_open": broker_count, "tracked_open": tracked_count,
+            "stale_tracked": len(stale_meta), "autocorrected": corrected if BROKER_RECONCILE_AUTOCORRECT else 0}
+
+
 # ====================================================
 # AUTO CLOSE
 # ====================================================
@@ -3072,6 +3174,13 @@ def auto_close_worker() -> None:
             if not AUTO_CLOSE_ENABLED:
                 time.sleep(AUTO_CLOSE_INTERVAL_SECONDS)
                 continue
+
+            # AUDIT FIX (H2): reconcile tracked open trades against the broker each cycle
+            # (log-only unless BROKER_RECONCILE_AUTOCORRECT). Never let it break the loop.
+            try:
+                reconcile_open_trades_with_broker()
+            except Exception:
+                pass
 
             with _STATE_LOCK:  # AUDIT FIX (C4): snapshot before iterating
                 open_meta_snapshot = list(_open_trade_meta.items())
@@ -3642,6 +3751,9 @@ def trade_event(t: TradeEvent):
 
     if t.status == "OPEN":
         note_trade_opened(tracking_key)
+        # AUDIT FIX (H2): a real fill is authoritative. Count it and retire the matching
+        # pending reservation created when /predict recommended this trade.
+        confirm_fill(INSTRUMENT_TO_PAIR6.get(t.instrument), fingerprint=getattr(t, "signal_id", None))
         opened_at_dt = dt.datetime.now(dt.timezone.utc)
         if row.get("ts"):
             try:
