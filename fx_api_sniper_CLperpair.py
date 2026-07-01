@@ -51,6 +51,11 @@ MAX_HOLD_MINUTES = int(os.getenv("MAX_HOLD_MINUTES", "60"))
 AUTO_CLOSE_ENABLED = os.getenv("AUTO_CLOSE_ENABLED", "true").lower() == "true"
 AUTO_CLOSE_CHECK_SECONDS = int(os.getenv("AUTO_CLOSE_CHECK_SECONDS", "1800"))
 AUTO_CLOSE_ALLOW_POSITION_FALLBACK = os.getenv("AUTO_CLOSE_ALLOW_POSITION_FALLBACK", "false").lower() == "true"
+# AUDIT FIX (H3): a 1800s poll against a 60m max-hold lets positions run ~50% past the
+# limit. Cap the effective poll interval at a quarter of the hold time (min 30s) so a
+# position is never held materially longer than intended, while still respecting a
+# smaller configured interval if the operator sets one.
+AUTO_CLOSE_INTERVAL_SECONDS = max(30, min(AUTO_CLOSE_CHECK_SECONDS, (MAX_HOLD_MINUTES * 60) // 4))
 
 OANDA_TOKEN = os.getenv("OANDA_TOKEN", "").strip()
 OANDA_ACCOUNT_ID = os.getenv("OANDA_ACCOUNT_ID", "").strip()
@@ -250,6 +255,13 @@ PAIR_MAP: Dict[str, str] = {
 
 INSTRUMENT_TO_PAIR6 = {v: k for k, v in PAIR_MAP.items()}
 JPY_INSTRUMENTS = {v for v in PAIR_MAP.values() if v.endswith("_JPY")}
+
+# AUDIT FIX (C4): FastAPI serves sync endpoints from a threadpool, and the
+# auto_close_worker runs in its own thread. All the mutable state below is touched from
+# both, so every read/write must hold this re-entrant lock. Without it, the daily-cap
+# check-and-increment is a TOCTOU race (two concurrent /predict calls can both pass the
+# cap) and iterating _open_trade_meta can raise "dict changed size during iteration".
+_STATE_LOCK = threading.RLock()
 
 _recent_signals: Dict[str, deque] = {}
 _bar_history: Dict[str, deque] = {pair6: deque(maxlen=BAR_HISTORY_LEN) for pair6 in PAIR_MAP}
@@ -494,6 +506,7 @@ def safe_bool_series(df: pd.DataFrame, col: str) -> pd.Series:
 # TRADE STATE
 # ====================================================
 def _check_daily_reset() -> None:
+    # Assumes caller holds _STATE_LOCK (all public callers below do).
     global _trade_day
     today = dt.datetime.now(dt.timezone.utc).date()
     if today != _trade_day:
@@ -501,37 +514,47 @@ def _check_daily_reset() -> None:
         _trade_count_today.clear()
 
 def trades_today(pair6: str) -> int:
-    _check_daily_reset()
-    return _trade_count_today.get(pair6, 0)
+    with _STATE_LOCK:
+        _check_daily_reset()
+        return _trade_count_today.get(pair6, 0)
 
 def trades_today_total() -> int:
-    _check_daily_reset()
-    return sum(_trade_count_today.values())
+    with _STATE_LOCK:
+        _check_daily_reset()
+        return sum(_trade_count_today.values())
 
 def inc_trade(pair6: str) -> None:
-    _check_daily_reset()
-    _trade_count_today[pair6] = _trade_count_today.get(pair6, 0) + 1
+    with _STATE_LOCK:
+        _check_daily_reset()
+        _trade_count_today[pair6] = _trade_count_today.get(pair6, 0) + 1
 
 def current_open_trade_count() -> int:
-    return len(_open_trade_ids)
+    with _STATE_LOCK:
+        return len(_open_trade_ids)
 
 def can_open_trade() -> bool:
-    return current_open_trade_count() < MAX_OPEN_TRADES
+    with _STATE_LOCK:
+        return len(_open_trade_ids) < MAX_OPEN_TRADES
 
 def note_trade_opened(tracking_key: Optional[str]) -> None:
     if tracking_key:
-        _open_trade_ids.add(str(tracking_key))
+        with _STATE_LOCK:
+            _open_trade_ids.add(str(tracking_key))
 
 def note_trade_closed(tracking_key: Optional[str]) -> None:
-    if tracking_key and str(tracking_key) in _open_trade_ids:
-        _open_trade_ids.remove(str(tracking_key))
+    if tracking_key:
+        with _STATE_LOCK:
+            _open_trade_ids.discard(str(tracking_key))
 
 def tracking_keys_for_close_event(t: "TradeEvent") -> List[str]:
     keys: List[str] = []
     for candidate in (t.broker_trade_id, t.client_trade_id, t.order_id):
         if candidate not in (None, ""):
             keys.append(str(candidate))
-    for tracking_key, meta in _open_trade_meta.items():
+    # Iterate a snapshot so a concurrent open/close can't mutate the dict mid-loop.
+    with _STATE_LOCK:
+        meta_items = list(_open_trade_meta.items())
+    for tracking_key, meta in meta_items:
         if str(meta.get("order_id", "")) and str(meta.get("order_id")) == str(t.order_id):
             keys.append(tracking_key)
         if str(meta.get("broker_trade_id", "")) and str(meta.get("broker_trade_id")) == str(t.broker_trade_id):
@@ -560,14 +583,39 @@ def make_signal_fingerprint(instrument: str, side: str, bar_time: int, mid_c: fl
     return hashlib.sha256(json.dumps(raw, sort_keys=True).encode("utf-8")).hexdigest()
 
 def is_duplicate_signal(pair6: str, fingerprint: str) -> bool:
-    tnow = now_unix()
-    q = _recent_signals.setdefault(pair6, deque())
-    while q and (tnow - q[0][0] > DUP_WINDOW_SECONDS):
-        q.popleft()
-    return any(fp == fingerprint for _, fp in q)
+    with _STATE_LOCK:
+        tnow = now_unix()
+        q = _recent_signals.setdefault(pair6, deque())
+        while q and (tnow - q[0][0] > DUP_WINDOW_SECONDS):
+            q.popleft()
+        return any(fp == fingerprint for _, fp in q)
 
 def remember_signal(pair6: str, fingerprint: str) -> None:
-    _recent_signals.setdefault(pair6, deque()).append((now_unix(), fingerprint))
+    with _STATE_LOCK:
+        _recent_signals.setdefault(pair6, deque()).append((now_unix(), fingerprint))
+
+
+def reserve_trade_slot(pair6: str, fingerprint: str) -> Optional[str]:
+    """Atomically re-check the trade caps and, if all pass, record the signal and
+    increment the daily counter — all under one lock so the check-and-increment cannot
+    interleave with a concurrent /predict (AUDIT FIX C4). Returns None on success, or a
+    short reason string if the slot could not be reserved (e.g. lost a race after the
+    earlier fast-path checks passed). The earlier per-cap checks in /predict still run
+    first to produce specific audit messages; this is the authoritative commit."""
+    with _STATE_LOCK:
+        _check_daily_reset()
+        if is_duplicate_signal(pair6, fingerprint):
+            return "duplicate_signal"
+        if sum(_trade_count_today.values()) >= MAX_TRADES_PER_DAY_TOTAL:
+            return "daily_total_cap"
+        if _trade_count_today.get(pair6, 0) >= MAX_TRADES_PER_DAY_PER_PAIR:
+            return "daily_pair_cap"
+        if len(_open_trade_ids) >= MAX_OPEN_TRADES:
+            return "open_trade_cap"
+        # Commit.
+        _recent_signals.setdefault(pair6, deque()).append((now_unix(), fingerprint))
+        _trade_count_today[pair6] = _trade_count_today.get(pair6, 0) + 1
+        return None
 
 # ====================================================
 # TECHNICALS
@@ -3022,20 +3070,23 @@ def auto_close_worker() -> None:
     while True:
         try:
             if not AUTO_CLOSE_ENABLED:
-                time.sleep(AUTO_CLOSE_CHECK_SECONDS)
+                time.sleep(AUTO_CLOSE_INTERVAL_SECONDS)
                 continue
 
-            if not _open_trade_meta:
-                time.sleep(AUTO_CLOSE_CHECK_SECONDS)
+            with _STATE_LOCK:  # AUDIT FIX (C4): snapshot before iterating
+                open_meta_snapshot = list(_open_trade_meta.items())
+
+            if not open_meta_snapshot:
+                time.sleep(AUTO_CLOSE_INTERVAL_SECONDS)
                 continue
 
             if not broker_can_close():
-                time.sleep(AUTO_CLOSE_CHECK_SECONDS)
+                time.sleep(AUTO_CLOSE_INTERVAL_SECONDS)
                 continue
 
             now = now_utc()
 
-            for tracking_key, meta in list(_open_trade_meta.items()):
+            for tracking_key, meta in open_meta_snapshot:
                 opened_at = meta.get("opened_at_dt")
                 if opened_at is None:
                     continue
@@ -3093,7 +3144,8 @@ def auto_close_worker() -> None:
                 }
                 write_trade_row(row)
                 note_trade_closed(tracking_key)
-                _open_trade_meta.pop(tracking_key, None)
+                with _STATE_LOCK:  # AUDIT FIX (C4)
+                    _open_trade_meta.pop(tracking_key, None)
 
         except Exception as e:
             write_audit_row({
@@ -3125,7 +3177,7 @@ def auto_close_worker() -> None:
                 "why": f"AUTO_CLOSE_WORKER_EXCEPTION | {repr(e)}",
             })
 
-        time.sleep(AUTO_CLOSE_CHECK_SECONDS)
+        time.sleep(AUTO_CLOSE_INTERVAL_SECONDS)
 
 # ====================================================
 # APP
@@ -3483,6 +3535,17 @@ def predict(p: TVPayload):
             why = f"OK: {side} passed | conf={conf:.2f}/{conf_gate:.2f}, margin={margin:.2f}/{margin_gate:.2f}, hint={hint_side or 'NONE'}, pair_score={pair_score:.2f}, equity_used={equity_used:.2f}"
             decision = side
 
+            # AUDIT FIX (C4): atomically re-check caps and commit the slot. In the normal
+            # single-request path this simply records the signal + increments the counter
+            # (identical to the old remember_signal()/inc_trade() pair). Under concurrency
+            # it prevents two requests from both slipping past the daily/open caps.
+            reserve_reason = reserve_trade_slot(pair6, fingerprint)
+            if reserve_reason is not None:
+                would_order = False
+                decision = "NONE"
+                units_abs = units_signed = sl_pips = tp_pips = sl_price = tp_price = None
+                why = f"Trade slot not reserved ({reserve_reason})"
+
         out = make_out(
             decision=decision,
             why=why,
@@ -3523,9 +3586,8 @@ def predict(p: TVPayload):
             **base,
         )
 
-        if would_order:
-            remember_signal(pair6, fingerprint)
-            inc_trade(pair6)
+        # NOTE: signal memory + daily counter are now committed atomically inside
+        # reserve_trade_slot() above (AUDIT FIX C4), so no separate increment here.
 
         write_audit_row(out)
         return out
@@ -3587,23 +3649,24 @@ def trade_event(t: TradeEvent):
             except Exception:
                 pass
 
-        _open_trade_meta[str(tracking_key)] = {
-            "tracking_key": str(tracking_key),
-            "instrument": t.instrument,
-            "symbol": row["symbol"],
-            "side": t.side,
-            "units_signed": t.units_signed,
-            "entry_price": t.entry_price,
-            "sl_price": t.sl_price,
-            "tp_price": t.tp_price,
-            "pair_score": t.pair_score,
-            "opened_at_dt": opened_at_dt,
-            "order_id": t.order_id,
-            "broker_trade_id": t.broker_trade_id,
-            "broker_order_id": t.broker_order_id,
-            "client_trade_id": t.client_trade_id,
-            "ts": row["ts"],
-        }
+        with _STATE_LOCK:  # AUDIT FIX (C4): guard the shared meta map
+            _open_trade_meta[str(tracking_key)] = {
+                "tracking_key": str(tracking_key),
+                "instrument": t.instrument,
+                "symbol": row["symbol"],
+                "side": t.side,
+                "units_signed": t.units_signed,
+                "entry_price": t.entry_price,
+                "sl_price": t.sl_price,
+                "tp_price": t.tp_price,
+                "pair_score": t.pair_score,
+                "opened_at_dt": opened_at_dt,
+                "order_id": t.order_id,
+                "broker_trade_id": t.broker_trade_id,
+                "broker_order_id": t.broker_order_id,
+                "client_trade_id": t.client_trade_id,
+                "ts": row["ts"],
+            }
 
     if t.status in ("CLOSED", "STOPPED", "TAKE_PROFIT", "MANUAL"):
         keys = tracking_keys_for_close_event(t)
@@ -3611,7 +3674,8 @@ def trade_event(t: TradeEvent):
             keys = [tracking_key]
         for key in keys:
             note_trade_closed(key)
-            _open_trade_meta.pop(str(key), None)
+            with _STATE_LOCK:  # AUDIT FIX (C4)
+                _open_trade_meta.pop(str(key), None)
 
     return {
         "ok": True,

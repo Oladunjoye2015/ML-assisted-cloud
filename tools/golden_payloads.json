@@ -1,0 +1,60 @@
+[
+  {
+    "name": "eurusd_uptrend_buy_hint",
+    "payload": {
+      "type": "fx", "symbol": "EURUSD", "tf": "H1", "t": 1719800000,
+      "mid_o": 1.08100, "mid_h": 1.08260, "mid_l": 1.08080, "mid_c": 1.08240,
+      "ema20": 1.08150, "ema50": 1.08050, "ema200": 1.07800,
+      "rsi14": 61.2, "adx14": 27.4, "atr14": 0.00110, "macdh": 0.00035,
+      "ret1": 0.0006, "ret3": 0.0011, "ret6": 0.0018, "ret12": 0.0025, "ret24": 0.0031,
+      "spread_c": 0.00012, "bid_c": 1.08234, "ask_c": 1.08246,
+      "trend_regime": 1, "vol_regime": 1, "equity": 200.0, "hint_side": "BUY"
+    }
+  },
+  {
+    "name": "eurusd_downtrend_sell_hint",
+    "payload": {
+      "type": "fx", "symbol": "EURUSD", "tf": "H1", "t": 1719803600,
+      "mid_o": 1.07900, "mid_h": 1.07940, "mid_l": 1.07680, "mid_c": 1.07710,
+      "ema20": 1.07850, "ema50": 1.07980, "ema200": 1.08200,
+      "rsi14": 38.5, "adx14": 24.1, "atr14": 0.00120, "macdh": -0.00040,
+      "ret1": -0.0007, "ret3": -0.0013, "ret6": -0.0020, "ret12": -0.0028, "ret24": -0.0035,
+      "spread_c": 0.00013, "bid_c": 1.07704, "ask_c": 1.07717,
+      "trend_regime": -1, "vol_regime": 1, "equity": 200.0, "hint_side": "SELL"
+    }
+  },
+  {
+    "name": "usdjpy_uptrend_force_buy",
+    "payload": {
+      "type": "fx", "symbol": "USDJPY", "tf": "H1", "t": 1719807200,
+      "mid_o": 157.100, "mid_h": 157.420, "mid_l": 157.080, "mid_c": 157.380,
+      "ema20": 157.200, "ema50": 156.950, "ema200": 156.100,
+      "rsi14": 64.0, "adx14": 31.0, "atr14": 0.150, "macdh": 0.045,
+      "ret1": 0.0009, "ret3": 0.0016, "ret6": 0.0024, "ret12": 0.0033, "ret24": 0.0042,
+      "spread_c": 0.014, "bid_c": 157.373, "ask_c": 157.387,
+      "trend_regime": 1, "vol_regime": 1, "equity": 200.0,
+      "hint_side": "BUY", "force_decision": "BUY"
+    }
+  },
+  {
+    "name": "usdjpy_wide_spread_force_sell",
+    "payload": {
+      "type": "fx", "symbol": "USDJPY", "tf": "H1", "t": 1719810800,
+      "mid_o": 157.000, "mid_h": 157.050, "mid_l": 156.700, "mid_c": 156.740,
+      "ema20": 156.900, "ema50": 157.050, "ema200": 157.400,
+      "rsi14": 35.0, "adx14": 22.0, "atr14": 0.140, "macdh": -0.050,
+      "ret1": -0.0008, "ret3": -0.0015, "ret6": -0.0022, "ret12": -0.0030, "ret24": -0.0038,
+      "spread_c": 0.060, "bid_c": 156.710, "ask_c": 156.770,
+      "trend_regime": -1, "vol_regime": 2, "equity": 200.0,
+      "hint_side": "SELL", "force_decision": "SELL"
+    }
+  },
+  {
+    "name": "unsupported_symbol_returns_none",
+    "payload": {
+      "type": "fx", "symbol": "BTCUSD", "tf": "H1", "t": 1719814400,
+      "mid_o": 60000.0, "mid_h": 60500.0, "mid_l": 59800.0, "mid_c": 60300.0,
+      "atr14": 350.0, "equity": 200.0
+    }
+  }
+]

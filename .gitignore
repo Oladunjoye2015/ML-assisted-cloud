@@ -64,6 +64,10 @@ temp/
 # Optional: uncomment if candle data is too large
 # oanda_h1_ba_live/
 
-# Optional: uncomment if model files are too large
+# Losing candidate models are never loaded at runtime (~430 MB across pairs).
+# Only models/<PAIR>/best_model.pkl + metadata are used by the service.
+models/*/candidate_models/
+
+# Optional: uncomment if all model files are too large for git (use LFS/registry instead)
 # models/
 # models_h1/
