@@ -82,6 +82,17 @@ HORIZON_BARS = int(os.getenv("HORIZON_BARS", "8"))
 SL_ATR = float(os.getenv("SL_ATR", "1.0"))
 TP_ATR = float(os.getenv("TP_ATR", "1.3"))
 
+# Label definition (audit C3 + label experiment). "barrier" = original symmetric ATR
+# triple-barrier, neutral bars dropped. "horizon_end" = same barriers but neutral bars
+# are resolved by the sign of the net move at the horizon end, so every scored bar has a
+# label and the training distribution matches what the live server scores.
+LABEL_MODE = os.getenv("LABEL_MODE", "horizon_end").strip().lower()
+# Purge/embargo (audit C2): drop the last (HORIZON_BARS + EMBARGO_BARS) training rows,
+# whose forward-looking labels overlap the validation window.
+EMBARGO_BARS = int(os.getenv("EMBARGO_BARS", "0"))
+# Cost applied when judging tradability, in ATR units (≈ one spread round trip).
+TRADABLE_COST_ATR = float(os.getenv("TRADABLE_COST_ATR", "0.05"))
+
 VALID_FRACTION = float(os.getenv("VALID_FRACTION", "0.20"))
 MIN_ROWS_AFTER_FEATURES = int(os.getenv("MIN_ROWS_AFTER_FEATURES", "1500"))
 MIN_VALID_ROWS = int(os.getenv("MIN_VALID_ROWS", "250"))
@@ -514,6 +525,13 @@ def build_atr_direction_labels(df: pd.DataFrame) -> pd.DataFrame:
             if long_sl_hit and short_sl_hit:
                 break
 
+        # LABEL_MODE == "horizon_end" (audit C3): if no barrier resolved within the
+        # horizon, label by the sign of the net move at the horizon end instead of leaving
+        # it neutral/NaN. Keeps train and live-scoring distributions aligned.
+        if LABEL_MODE == "horizon_end" and not np.isfinite(y[i]):
+            y[i] = 1.0 if closes[i + HORIZON_BARS] > entry else 0.0
+            label_reason[i] = "horizon_end"
+
     df["y"] = y
     df["label_reason"] = label_reason
 
@@ -537,6 +555,12 @@ class ModelMetrics:
     long_rate: float
     pair_score: float
     tradable: bool
+    # Honest, out-of-sample, cost-aware fields (audit C1). Defaults keep older callers
+    # (e.g. the TCN path using evaluate_probabilities) valid.
+    expectancy_r: float = 0.0
+    exp_ci_lo: float = 0.0
+    exp_ci_hi: float = 0.0
+    gate_selected_oos: bool = False
 
 
 def evaluate_probabilities(
@@ -627,12 +651,15 @@ def evaluate_probabilities(
 
 
 def rank_key(m: ModelMetrics):
+    # AUDIT FIX (C1): rank by HONEST signals first — is it tradable, and what is the
+    # cost-aware expectancy CI lower bound — instead of in-sample precision that was
+    # optimised on the same slice it's reported on.
     return (
-        m.precision_at_gate,
-        m.pair_score,
+        1 if getattr(m, "tradable", False) else 0,
+        getattr(m, "exp_ci_lo", 0.0),
         m.auc,
+        m.pair_score,
         -m.brier,
-        m.trades_at_gate,
     )
 
 
@@ -827,6 +854,82 @@ def build_classical_models() -> Dict[str, Any]:
     return models
 
 
+def _choose_gate_on_train(p_train: np.ndarray, y_train: np.ndarray) -> Tuple[float, float]:
+    """AUDIT FIX (C1): pick the conf/margin gate that maximises precision ON THE TRAINING
+    predictions, so the gate is chosen WITHOUT seeing the validation set it's judged on."""
+    p = np.clip(np.asarray(p_train, float), 1e-6, 1 - 1e-6)
+    y = np.asarray(y_train, int)
+    conf = np.maximum(p, 1 - p)
+    margin = np.abs(p - 0.5) * 2.0
+    correct = ((p >= 0.5).astype(int) == y).astype(int)
+    best = (-1.0, 0.56, 0.06, 0)
+    for gate in GATE_GRID:
+        for mgate in MARGIN_GRID:
+            mask = (conf >= gate) & (margin >= mgate)
+            trades = int(mask.sum())
+            if trades < MIN_GATE_TRADES:
+                continue
+            precision = float(correct[mask].mean())
+            if precision > best[0] or (math.isclose(precision, best[0]) and trades > best[3]):
+                best = (precision, gate, mgate, trades)
+    return best[1], best[2]
+
+
+def evaluate_oos(
+    model_name: str,
+    y_train: np.ndarray, p_train: np.ndarray,
+    y_valid: np.ndarray, p_valid: np.ndarray,
+    spread_atr_valid: np.ndarray,
+) -> ModelMetrics:
+    """Honest evaluation: gate chosen on train, everything reported on the untouched valid
+    set, with a cost-aware expectancy (R units) and bootstrap 95% CI driving `tradable`."""
+    y_valid = np.asarray(y_valid, int)
+    p_valid = np.clip(np.asarray(p_valid, float), 1e-6, 1 - 1e-6)
+    pred = (p_valid >= 0.5).astype(int)
+    auc = safe_auc(y_valid, p_valid)
+    brier = safe_brier(y_valid, p_valid)
+    acc = float(accuracy_score(y_valid, pred))
+
+    gate, mgate = _choose_gate_on_train(p_train, y_train)
+    conf = np.maximum(p_valid, 1 - p_valid)
+    margin = np.abs(p_valid - 0.5) * 2.0
+    mask = (conf >= gate) & (margin >= mgate)
+    trades = int(mask.sum())
+    correct = (pred == y_valid).astype(int)
+    precision = float(correct[mask].mean()) if trades > 0 else 0.0
+
+    # Cost-aware expectancy in R: win=+TP_ATR, loss=-SL_ATR, minus one spread (ATR units).
+    sa = np.asarray(spread_atr_valid, float)
+    pnl = []
+    for idx in np.where(mask)[0]:
+        cost = sa[idx] if idx < len(sa) and np.isfinite(sa[idx]) else 0.0
+        pnl.append((TP_ATR if correct[idx] == 1 else -SL_ATR) - max(cost, TRADABLE_COST_ATR))
+    pnl = np.asarray(pnl, float)
+    if len(pnl) >= 10:
+        rng = np.random.default_rng(RANDOM_STATE)
+        boot = np.array([rng.choice(pnl, len(pnl), replace=True).mean() for _ in range(1000)])
+        exp_r = float(pnl.mean()); lo, hi = (float(x) for x in np.percentile(boot, [2.5, 97.5]))
+    else:
+        exp_r = lo = hi = 0.0
+
+    trade_sample_score = min(trades / max(MIN_GATE_TRADES, 1), 2.0) / 2.0
+    auc_score = max(0.0, (auc - 0.50) / 0.10)
+    precision_component = max(0.0, (precision - 0.50) / 0.15)
+    pair_score = float(max(0.0, min(0.55 * precision_component + 0.30 * auc_score + 0.15 * trade_sample_score, 1.0)))
+
+    # HONEST tradable bar: positive cost-aware edge (CI lower bound > 0) on enough trades.
+    tradable = bool(len(pnl) >= MIN_GATE_TRADES and lo > 0.0 and auc >= MIN_AUC_TO_TRADE)
+
+    return ModelMetrics(
+        model_name=model_name, auc=float(auc), brier=float(brier), accuracy=float(acc),
+        best_gate=float(gate), best_margin_gate=float(mgate),
+        precision_at_gate=float(precision), trades_at_gate=int(trades),
+        long_rate=float(np.mean(p_valid >= 0.5)), pair_score=pair_score, tradable=tradable,
+        expectancy_r=round(exp_r, 4), exp_ci_lo=round(lo, 4), exp_ci_hi=round(hi, 4),
+        gate_selected_oos=True,
+    )
+
+
 def train_classical_models(
     X_train: pd.DataFrame,
     y_train: np.ndarray,
@@ -837,6 +940,9 @@ def train_classical_models(
 
     fitted: Dict[str, Any] = {}
     metrics: List[ModelMetrics] = []
+    spread_atr_valid = (
+        X_valid["spread_atr"].values if "spread_atr" in X_valid.columns else np.zeros(len(X_valid))
+    )
 
     for name, model in models.items():
         print(f"    Training {name}...")
@@ -844,8 +950,10 @@ def train_classical_models(
         try:
             model.fit(X_train, y_train)
             p = model.predict_proba(X_valid)[:, 1]
+            p_tr = model.predict_proba(X_train)[:, 1]
 
-            m = evaluate_probabilities(name, y_valid, p)
+            # AUDIT FIX (C1): gate chosen on train, metrics + cost-aware edge on valid.
+            m = evaluate_oos(name, y_train, p_tr, y_valid, p, spread_atr_valid)
 
             fitted[name] = model
             metrics.append(m)
@@ -1099,8 +1207,12 @@ def train_pair(csv_path: Path) -> Dict[str, Any]:
 
     split_idx = int(len(df) * (1.0 - VALID_FRACTION))
 
-    X_train = X.iloc[:split_idx].copy()
-    y_train = y[:split_idx]
+    # AUDIT FIX (C2): purge the last HORIZON_BARS (+EMBARGO_BARS) training rows, whose
+    # forward-looking labels overlap the validation window and would leak future info.
+    train_end = max(0, split_idx - HORIZON_BARS - EMBARGO_BARS)
+
+    X_train = X.iloc[:train_end].copy()
+    y_train = y[:train_end]
 
     X_valid = X.iloc[split_idx:].copy()
     y_valid = y[split_idx:]

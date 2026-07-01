@@ -1,6 +1,10 @@
 import numpy as np
 import pandas as pd
-from mlac.labeling import build_atr_direction_labels, purged_split_index
+from mlac.labeling import (
+    build_atr_direction_labels,
+    build_horizon_resolved_labels,
+    purged_split_index,
+)
 
 
 def _frame(rows):
@@ -41,6 +45,19 @@ def test_neutral_stays_nan():
     df = _frame([[100, 100, 100, 1.0]] + [[100.1, 99.9, 100.0, 1.0]] * 5)
     out = build_atr_direction_labels(df, horizon_bars=2, tp_atr=1.3, sl_atr=1.0)
     assert np.isnan(out["y"].iloc[0])
+
+
+def test_horizon_resolved_labels_never_neutral():
+    # A flat, no-barrier series: baseline drops it (NaN); horizon-resolved labels it by
+    # the net move at the end. Here it drifts slightly UP over the horizon -> y=1.
+    rows = [[100, 100, 100, 1.0]]
+    rows += [[100.05 + 0.01 * k, 99.95 + 0.01 * k, 100.0 + 0.01 * k, 1.0] for k in range(1, 6)]
+    df = _frame(rows)
+    base = build_atr_direction_labels(df, horizon_bars=3, tp_atr=1.3, sl_atr=1.0)
+    res = build_horizon_resolved_labels(df, horizon_bars=3, tp_atr=1.3, sl_atr=1.0)
+    assert np.isnan(base["y"].iloc[0])          # baseline: neutral -> dropped
+    assert res["y"].iloc[0] == 1                 # resolved: net up -> 1
+    assert res["label_reason"].iloc[0] == "horizon_end"
 
 
 def test_purged_split_removes_horizon_overlap():
