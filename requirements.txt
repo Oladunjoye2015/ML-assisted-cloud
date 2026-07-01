@@ -20,12 +20,12 @@ xgboost==3.2.0
 sqlalchemy==2.0.50
 openpyxl==3.1.5
 
-# Optional: deep-learning (TCN) path. Imported lazily in fx_api_sniper_CLperpair.py.
-# Pinned to match the current .venv; comment out if you do not use the TCN model.
-torch==2.2.2
+# NOTE: torch (TCN deep-learning path) intentionally excluded — the TCN model is not
+# live (tcn_live_allowed=false on every pair) and it bloats the Railway build by ~1GB+.
+# Re-add `torch==2.2.2` only if you start training/serving the TCN challenger.
 
-# Optional: LLM signal-review path. Imported lazily; falls back to rule-based review
-# when the provider package / API key is absent. AI_REVIEW_PROVIDER selects which.
-# Default provider is "openai" (gpt-4o-mini); "anthropic" is also supported.
+# LLM signal-review path — the second-layer verification run before a trade is placed.
+# Imported lazily; AI_REVIEW_PROVIDER selects which (default "openai"/gpt-4o-mini,
+# "anthropic" also supported). Requires AI_REVIEW_ENABLED=true and the provider API key.
 openai==1.54.0
 anthropic==0.40.0
