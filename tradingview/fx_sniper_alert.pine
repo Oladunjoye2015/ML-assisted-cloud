@@ -1,0 +1,151 @@
+//@version=5
+// =====================================================================================
+// FX Sniper — /predict webhook feed
+// Sends one JSON alert per CLOSED bar, matching the TVPayload schema consumed by
+// fx_api_sniper_CLperpair.py (/predict). Put your service URL in the alert's webhook.
+//
+// USAGE
+//   1. Add to an H1 chart of the pair you trade (matches the models' H1 timeframe).
+//   2. Create an alert:  Condition = "FX Sniper ... : Any alert() function call",
+//      "Once per bar close",  Webhook URL = https://<your-service>/predict
+//   3. Leave the alert "Message" box as-is — this script supplies the JSON at runtime.
+//
+// NOTE: this is the DATA/TRIGGER layer only; the model makes the decision. Point the
+// webhook at your PRACTICE endpoint until a pair clears the walk-forward edge bar.
+// Higher-timeframe values use confirmed HTF bars (lookahead off) but can still update
+// intrabar on the forming HTF candle — firing "once per bar close" keeps them stable.
+// =====================================================================================
+indicator("FX Sniper /predict feed", overlay=true)
+
+// ---------------- inputs ----------------
+symOverride   = input.string("", "Symbol override (blank = chart symbol, e.g. EURUSD)")
+sendHint      = input.bool(true,  "Send directional hint (EMA20>EMA50 & price vs EMA200)")
+typSpreadPips = input.float(1.0,  "Typical spread (pips)", minval=0.0, step=0.1)
+equityInput   = input.float(200,  "Account equity to report", minval=0)
+tfLabel       = input.string("H1","Timeframe label sent in payload")
+
+// ---------------- helpers ----------------
+pip = syminfo.mintick * 10.0                     // 0.0001 for 5-digit, 0.01 for 3-digit JPY
+sym = symOverride != "" ? symOverride : str.replace_all(syminfo.ticker, "_", "")
+
+// ---------------- core indicators ----------------
+ema20  = ta.ema(close, 20)
+ema50  = ta.ema(close, 50)
+ema200 = ta.ema(close, 200)
+rsi14  = ta.rsi(close, 14)
+atr14  = ta.atr(14)
+[macdLine, signalLine, macdHist] = ta.macd(close, 12, 26, 9)
+[diPlus, diMinus, adx14] = ta.dmi(14, 14)
+
+// Bollinger width (in pips)
+bbBasis = ta.sma(close, 20)
+bbDev   = 2.0 * ta.stdev(close, 20)
+bbUpper = bbBasis + bbDev
+bbLower = bbBasis - bbDev
+bbw     = (bbUpper - bbLower) / pip
+
+// Returns
+ret1  = close / close[1]  - 1.0
+ret3  = close / close[3]  - 1.0
+ret6  = close / close[6]  - 1.0
+ret12 = close / close[12] - 1.0
+ret24 = close / close[24] - 1.0
+
+// Distances from EMAs (pips) and slopes (pips)
+d20 = (close - ema20)  / pip
+d50 = (close - ema50)  / pip
+d200= (close - ema200) / pip
+s20 = (ema20  - ema20[3])  / pip
+s50 = (ema50  - ema50[6])  / pip
+s200= (ema200 - ema200[12]) / pip
+
+// Spread
+spread_c    = typSpreadPips * pip
+spread_pips = typSpreadPips
+spread_atr  = atr14 > 0 ? spread_c / atr14 : 0.0
+bid_c = close - spread_c / 2.0
+ask_c = close + spread_c / 2.0
+
+// Regimes
+trend_regime = ema20 > ema50 ? 1 : (ema20 < ema50 ? -1 : 0)
+vol_regime   = atr14 > ta.sma(atr14, 100) ? 1 : 0
+
+// Time fields (UTC)
+hourUtc = hour(time_close, "UTC")
+dowUtc  = (dayofweek(time_close, "UTC") + 5) % 7   // -> Mon=0 .. Sun=6 (pandas convention)
+monUtc  = month(time_close, "UTC")
+sessionCode = hourUtc < 7 ? 0 : (hourUtc < 12 ? 1 : (hourUtc < 17 ? 2 : 3))
+
+// Higher-timeframe context (confirmed bars). Helper returns just the ADX component.
+f_adx() =>
+    [_p, _m, _a] = ta.dmi(14, 14)
+    _a
+ema50_h4 = request.security(syminfo.tickerid, "240", ta.ema(close, 50), lookahead=barmerge.lookahead_off)
+adx14_h4 = request.security(syminfo.tickerid, "240", f_adx(),           lookahead=barmerge.lookahead_off)
+ema20_d1 = request.security(syminfo.tickerid, "D",   ta.ema(close, 20), lookahead=barmerge.lookahead_off)
+rsi14_d1 = request.security(syminfo.tickerid, "D",   ta.rsi(close, 14), lookahead=barmerge.lookahead_off)
+
+// Directional hint (optional)
+hint = ema20 > ema50 and close > ema200 ? "BUY" : (ema20 < ema50 and close < ema200 ? "SELL" : "")
+
+// ---------------- build JSON payload ----------------
+f(x) => str.tostring(x)
+q(s) => "\"" + s + "\""
+
+json = "{" +
+  q("type")   + ":" + q("fx") + "," +
+  q("symbol") + ":" + q(sym) + "," +
+  q("tf")     + ":" + q(tfLabel) + "," +
+  q("t")      + ":" + f(int(time_close / 1000)) + "," +
+  q("mid_o")  + ":" + f(open)  + "," +
+  q("mid_h")  + ":" + f(high)  + "," +
+  q("mid_l")  + ":" + f(low)   + "," +
+  q("mid_c")  + ":" + f(close) + "," +
+  q("ema20")  + ":" + f(ema20)  + "," +
+  q("ema50")  + ":" + f(ema50)  + "," +
+  q("ema200") + ":" + f(ema200) + "," +
+  q("rsi14")  + ":" + f(rsi14)  + "," +
+  q("adx14")  + ":" + f(adx14)  + "," +
+  q("atr14")  + ":" + f(atr14)  + "," +
+  q("macdh")  + ":" + f(macdHist) + "," +
+  q("plus_di14")  + ":" + f(diPlus)  + "," +
+  q("minus_di14") + ":" + f(diMinus) + "," +
+  q("ret1")  + ":" + f(ret1)  + "," +
+  q("ret3")  + ":" + f(ret3)  + "," +
+  q("ret6")  + ":" + f(ret6)  + "," +
+  q("ret12") + ":" + f(ret12) + "," +
+  q("ret24") + ":" + f(ret24) + "," +
+  q("d20")  + ":" + f(d20) + "," +
+  q("d50")  + ":" + f(d50) + "," +
+  q("d200") + ":" + f(d200) + "," +
+  q("s20")  + ":" + f(s20) + "," +
+  q("s50")  + ":" + f(s50) + "," +
+  q("s200") + ":" + f(s200) + "," +
+  q("bbw")  + ":" + f(bbw) + "," +
+  q("spread_c")    + ":" + f(spread_c)    + "," +
+  q("spread_pips") + ":" + f(spread_pips) + "," +
+  q("spread_atr")  + ":" + f(spread_atr)  + "," +
+  q("bid_c") + ":" + f(bid_c) + "," +
+  q("ask_c") + ":" + f(ask_c) + "," +
+  q("trend_regime") + ":" + f(trend_regime) + "," +
+  q("vol_regime")   + ":" + f(vol_regime)   + "," +
+  q("hour")    + ":" + f(hourUtc) + "," +
+  q("hr")      + ":" + f(hourUtc) + "," +
+  q("dow")     + ":" + f(dowUtc)  + "," +
+  q("month")   + ":" + f(monUtc)  + "," +
+  q("session") + ":" + f(sessionCode) + "," +
+  q("ema50_h4") + ":" + f(ema50_h4) + "," +
+  q("adx14_h4") + ":" + f(adx14_h4) + "," +
+  q("ema20_d1") + ":" + f(ema20_d1) + "," +
+  q("rsi14_d1") + ":" + f(rsi14_d1) + "," +
+  q("equity") + ":" + f(equityInput) +
+  (sendHint and hint != "" ? "," + q("hint_side") + ":" + q(hint) : "") +
+  "}"
+
+// ---------------- fire once per closed bar ----------------
+if barstate.isconfirmed
+    alert(json, alert.freq_once_per_bar_close)
+
+// Optional: show hint on the chart
+plotchar(sendHint and hint == "BUY"  and barstate.isconfirmed, "buy hint",  "▲", location.belowbar, color.green, size=size.tiny)
+plotchar(sendHint and hint == "SELL" and barstate.isconfirmed, "sell hint", "▼", location.abovebar, color.red,   size=size.tiny)
