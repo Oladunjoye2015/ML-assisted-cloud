@@ -3904,6 +3904,60 @@ def health():
         "max_trades_per_day_per_pair": MAX_TRADES_PER_DAY_PER_PAIR,
     }
 
+@app.get("/health/deep")
+def health_deep():
+    """Live runtime STATE (Phase 5 observability) — complements /health's config dump.
+    Reports fill-aware trade counters, pending reservations, open trades, and broker
+    reachability so drift or a stuck cap is visible at a glance."""
+    with _STATE_LOCK:
+        _check_daily_reset(); _prune_pending()
+        pending_by_pair = {p: len(q) for p, q in _pending_reservations.items() if q}
+        confirmed = dict(_trade_count_today)
+        open_ids = len(_open_trade_ids)
+        tracked_meta = len(_open_trade_meta)
+    broker_ok = False
+    broker_open = None
+    try:
+        if broker_can_close():
+            res = oanda_request("GET", f"/v3/accounts/{OANDA_ACCOUNT_ID}/openTrades", timeout=10)
+            broker_ok = bool(res.get("ok"))
+            if broker_ok:
+                broker_open = len((res.get("data") or {}).get("trades") or [])
+    except Exception:
+        broker_ok = False
+    return {
+        "ok": True,
+        "ts": utc_ts(),
+        "trade_day": str(_trade_day),
+        "pairs_loaded": len(BUNDLES),
+        "caps": {
+            "max_open_trades": MAX_OPEN_TRADES,
+            "max_trades_per_day_total": MAX_TRADES_PER_DAY_TOTAL,
+            "max_trades_per_day_per_pair": MAX_TRADES_PER_DAY_PER_PAIR,
+        },
+        "trades_today": {
+            "confirmed_total": sum(confirmed.values()),
+            "confirmed_by_pair": {pair_to_instrument(p): n for p, n in confirmed.items()},
+            "pending_total": sum(pending_by_pair.values()),
+            "pending_by_pair": {pair_to_instrument(p): n for p, n in pending_by_pair.items()},
+            "effective_total": trades_today_total(),
+            "reservation_ttl_seconds": RESERVATION_TTL_SECONDS,
+        },
+        "open_trades": {
+            "tracked_ids": open_ids,
+            "tracked_meta": tracked_meta,
+            "effective_with_pending": effective_open_trade_count(),
+            "broker_reachable": broker_ok,
+            "broker_open_trades": broker_open,
+            "reconcile_enabled": BROKER_RECONCILE_ENABLED,
+        },
+        "auto_close": {
+            "enabled": AUTO_CLOSE_ENABLED,
+            "max_hold_minutes": MAX_HOLD_MINUTES,
+            "effective_interval_seconds": AUTO_CLOSE_INTERVAL_SECONDS,
+        },
+    }
+
 @app.get("/stats")
 def stats():
     df = read_audit_df()

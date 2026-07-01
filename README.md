@@ -104,6 +104,46 @@ python tools/golden_snapshot.py --write      # capture current behaviour as gold
 python tools/golden_snapshot.py --check       # fail if any output changed
 ```
 
+## Development (package, tests, tools)
+
+Pure, testable logic is being extracted from the monolith into a dependency-light
+package `mlac/` (only needs numpy + pandas):
+
+```
+mlac/instruments.py   pair maps, pip size/precision, price + units helpers
+mlac/indicators.py    rsi / atr / adx / ema (matches the trainer)
+mlac/labeling.py      ATR triple-barrier labels + purged-split helper
+mlac/sizing.py        compute_units_dynamic, compute_sl_tp_prices
+mlac/gating.py        side/margin/gate decision predicates
+mlac/reservation.py   ReservationBook — fill-aware caps (confirmed + pending + TTL)
+```
+
+These are the tested reference implementations. The live entrypoint has **not** yet been
+rewired to import from `mlac/` — that migration must be verified with
+`tools/golden_snapshot.py` before deploying (the entrypoint auto-deploys to live trading).
+
+Run the tests:
+
+```bash
+pip install pytest numpy pandas
+pytest                      # 30 unit tests over mlac/
+```
+
+CI runs the same suite on every push/PR (`.github/workflows/ci.yml`).
+
+Tools:
+
+```bash
+python tools/model_store.py report            # artifact sizes, tradable flags
+python tools/model_store.py verify            # every pair has required files
+python tools/model_store.py prune-candidates --yes   # free ~428 MB of unused candidates
+python tools/walk_forward_eval.py             # honest out-of-sample evaluation
+python tools/golden_snapshot.py --write|--check      # behaviour baseline for refactors
+```
+
+Observability: `GET /health` dumps config; `GET /health/deep` reports live runtime state
+(fill-aware trade counters, pending reservations, tracked vs broker open trades).
+
 ## Known issues
 
 See `AUDIT_AND_REFACTOR_PLAN.md` for the full severity-ranked list. The critical ones:
