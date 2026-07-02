@@ -156,6 +156,7 @@ AUTO_MODEL_REGISTRY_ENABLED = os.getenv("AUTO_MODEL_REGISTRY_ENABLED", "true").l
 AUTO_REGISTRY_PATH = os.getenv("AUTO_REGISTRY_PATH", os.path.join(MODELS_DIR, "registry.json"))
 TCN_LOOKBACK = int(os.getenv("TCN_LOOKBACK", "48"))
 AUTO_REGISTRY_OVERRIDES_JOBLIB = os.getenv("AUTO_REGISTRY_OVERRIDES_JOBLIB", "true").lower() == "true"
+ENFORCE_REGISTRY_TRADABLE = os.getenv("ENFORCE_REGISTRY_TRADABLE", "true").lower() == "true"
 TORCH_DEVICE = "cuda" if (torch is not None and torch.cuda.is_available()) else "cpu"
 
 
@@ -249,17 +250,24 @@ TECH_NEAR_SR_ATR_MULT = float(os.getenv("TECH_NEAR_SR_ATR_MULT", "0.35"))
 NEWS_EVENTS: List[Dict[str, Any]] = []
 
 PAIR_MAP: Dict[str, str] = {
-    "EURGBP": "EUR_GBP",
-    "USDCAD": "USD_CAD",
-    "CADJPY": "CAD_JPY",
-    "AUDJPY": "AUD_JPY",
-    "USDJPY": "USD_JPY",
-    "EURJPY": "EUR_JPY",
-    "GBPJPY": "GBP_JPY",
-    "NZDJPY": "NZD_JPY",
-    "GBPCHF": "GBP_CHF",
     "AUDCAD": "AUD_CAD",
+    "AUDJPY": "AUD_JPY",
+    "AUDNZD": "AUD_NZD",
+    "AUDUSD": "AUD_USD",
+    "CADJPY": "CAD_JPY",
+    "CHFJPY": "CHF_JPY",
+    "EURCHF": "EUR_CHF",
+    "EURGBP": "EUR_GBP",
+    "EURJPY": "EUR_JPY",
+    "EURUSD": "EUR_USD",
+    "GBPCHF": "GBP_CHF",
+    "GBPJPY": "GBP_JPY",
+    "GBPUSD": "GBP_USD",
+    "NZDJPY": "NZD_JPY",
+    "NZDUSD": "NZD_USD",
+    "USDCAD": "USD_CAD",
     "USDCHF": "USD_CHF",
+    "USDJPY": "USD_JPY",
 }
 
 INSTRUMENT_TO_PAIR6 = {v: k for k, v in PAIR_MAP.items()}
@@ -3407,6 +3415,25 @@ def predict(p: TVPayload):
         pair_score = safe_float(BUNDLES.get(pair6, {}).get("pair_score"), -1.0)
         if pair_score < 0:
             pair_score = compute_pair_score(instrument, avg_auc)
+
+    raw_meta = b.get("raw_meta") or {}
+    if ENFORCE_REGISTRY_TRADABLE and raw_meta.get("tradable") is False:
+        reason = raw_meta.get("tradable_reason") or "registry marks pair as not tradable"
+        out = make_out(
+            decision="NONE",
+            why=f"Not tradable: {reason}",
+            would_order=False,
+            units=None,
+            units_signed=None,
+            sl_pips=None,
+            tp_pips=None,
+            sl_price=None,
+            tp_price=None,
+            decision_source="registry_tradability_block",
+            **build_response_base(p, pair6, instrument, model_version, avg_auc, pair_score, equity_used, hint_side),
+        )
+        write_audit_row(out)
+        return out
 
     bad_payload_reason = payload_sanity_checks(payload, instrument)
     if bad_payload_reason:

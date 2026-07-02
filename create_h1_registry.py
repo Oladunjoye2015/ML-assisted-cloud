@@ -116,6 +116,20 @@ for pair_dir in sorted(MODELS_DIR.iterdir()):
                      thresholds.get("conf"), thresholds.get("threshold"), default=0.54)
     real_margin = pick(best.get("best_margin_gate"), thresholds.get("margin_gate"),
                        thresholds.get("margin"), default=0.04)
+    feature_columns = (
+        metrics.get("features")
+        or metrics.get("feature_order")
+        or metrics.get("feature_cols")
+        or metrics.get("feature_columns")
+        or []
+    )
+    if not feature_columns:
+        feature_columns_path = pair_dir / "feature_columns.json"
+        if feature_columns_path.exists():
+            try:
+                feature_columns = json.loads(feature_columns_path.read_text())
+            except Exception:
+                feature_columns = []
 
     # Tradability is decided by the walk-forward bar, NOT the in-sample training flag.
     wf = WALKFORWARD_EDGE.get(pair)
@@ -136,7 +150,7 @@ for pair_dir in sorted(MODELS_DIR.iterdir()):
         "pair": pair,
         "best_model": best_model,
         "model_path": f"models/{pair}/best_model.pkl",
-        "features": metrics.get("features") or metrics.get("feature_order") or metrics.get("feature_cols") or [],
+        "features": feature_columns,
         # Keep a placeholder ONLY when the value is truly missing, and record that fact
         # so downstream logic (and humans) know the number is not measured.
         "avg_auc": real_auc if real_auc is not None else 0.50,

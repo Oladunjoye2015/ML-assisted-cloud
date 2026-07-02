@@ -2,7 +2,7 @@ from mlac import instruments as I
 
 
 def test_normalize_pair_accepts_known_and_rejects_unknown():
-    assert I.normalize_pair("eur/usd") is None          # not in PAIR_MAP
+    assert I.normalize_pair("eur/usd") == "EURUSD"
     assert I.normalize_pair("EUR_GBP") == "EURGBP"
     assert I.normalize_pair("usdjpy") == "USDJPY"
     assert I.normalize_pair("BTCUSD") is None

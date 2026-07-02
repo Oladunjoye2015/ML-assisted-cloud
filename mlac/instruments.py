@@ -10,17 +10,24 @@ from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional
 
 PAIR_MAP = {
-    "EURGBP": "EUR_GBP",
-    "USDCAD": "USD_CAD",
-    "CADJPY": "CAD_JPY",
-    "AUDJPY": "AUD_JPY",
-    "USDJPY": "USD_JPY",
-    "EURJPY": "EUR_JPY",
-    "GBPJPY": "GBP_JPY",
-    "NZDJPY": "NZD_JPY",
-    "GBPCHF": "GBP_CHF",
     "AUDCAD": "AUD_CAD",
+    "AUDJPY": "AUD_JPY",
+    "AUDNZD": "AUD_NZD",
+    "AUDUSD": "AUD_USD",
+    "CADJPY": "CAD_JPY",
+    "CHFJPY": "CHF_JPY",
+    "EURCHF": "EUR_CHF",
+    "EURGBP": "EUR_GBP",
+    "EURJPY": "EUR_JPY",
+    "EURUSD": "EUR_USD",
+    "GBPCHF": "GBP_CHF",
+    "GBPJPY": "GBP_JPY",
+    "GBPUSD": "GBP_USD",
+    "NZDJPY": "NZD_JPY",
+    "NZDUSD": "NZD_USD",
+    "USDCAD": "USD_CAD",
     "USDCHF": "USD_CHF",
+    "USDJPY": "USD_JPY",
 }
 INSTRUMENT_TO_PAIR6 = {v: k for k, v in PAIR_MAP.items()}
 JPY_INSTRUMENTS = {v for v in PAIR_MAP.values() if v.endswith("_JPY")}
