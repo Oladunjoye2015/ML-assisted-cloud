@@ -1,151 +1,288 @@
-//@version=5
-// =====================================================================================
-// FX Sniper — /predict webhook feed
-// Sends one JSON alert per CLOSED bar, matching the TVPayload schema consumed by
-// fx_api_sniper_CLperpair.py (/predict). Put your service URL in the alert's webhook.
+// This Pine Script(R) code is subject to the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// FX Sniper /predict webhook feed for ML-Assisted-Cloud.
 //
-// USAGE
-//   1. Add to an H1 chart of the pair you trade (matches the models' H1 timeframe).
-//   2. Create an alert:  Condition = "FX Sniper ... : Any alert() function call",
-//      "Once per bar close",  Webhook URL = https://<your-service>/predict
-//   3. Leave the alert "Message" box as-is — this script supplies the JSON at runtime.
+// Current registry result after the latest retrain:
+//   Active tradable pair: USDJPY
+//   Live model: lightgbm
+//   Training validation AUC: 0.5278
+//   Walk-forward OOS AUC: 0.5137
+//   Walk-forward expectancy: +0.087R, 95% CI lower bound +0.0228R, n=1182
 //
-// NOTE: this is the DATA/TRIGGER layer only; the model makes the decision. Point the
-// webhook at your PRACTICE endpoint until a pair clears the walk-forward edge bar.
-// Higher-timeframe values use confirmed HTF bars (lookahead off) but can still update
-// intrabar on the forming HTF candle — firing "once per bar close" keeps them stable.
-// =====================================================================================
-indicator("FX Sniper /predict feed", overlay=true)
+// This script is the data transport layer only. It sends the H1 bar payload to the
+// FastAPI /predict endpoint; the server owns the ML decision, tradability gate,
+// sizing, SL/TP, duplicate checks, news/noise guards, and risk controls.
 
-// ---------------- inputs ----------------
-symOverride   = input.string("", "Symbol override (blank = chart symbol, e.g. EURUSD)")
-sendHint      = input.bool(true,  "Send directional hint (EMA20>EMA50 & price vs EMA200)")
-typSpreadPips = input.float(1.0,  "Typical spread (pips)", minval=0.0, step=0.1)
-equityInput   = input.float(200,  "Account equity to report", minval=0)
-tfLabel       = input.string("H1","Timeframe label sent in payload")
+//@version=6
+indicator("FX Sniper /predict feed - USDJPY active", overlay=true)
 
-// ---------------- helpers ----------------
-pip = syminfo.mintick * 10.0                     // 0.0001 for 5-digit, 0.01 for 3-digit JPY
-sym = symOverride != "" ? symOverride : str.replace_all(syminfo.ticker, "_", "")
+//==============================================================================
+// Inputs
+//==============================================================================
+pairPreset = input.string(
+     "USDJPY",
+     "Pair sent to server",
+     options=[
+         "USDJPY",
+         "AUDCAD", "AUDJPY", "AUDNZD", "AUDUSD",
+         "CADJPY", "CHFJPY",
+         "EURCHF", "EURGBP", "EURJPY", "EURUSD",
+         "GBPCHF", "GBPJPY", "GBPUSD",
+         "NZDJPY", "NZDUSD",
+         "USDCAD", "USDCHF",
+         "Custom"
+     ]
+)
+customSymbol = input.string("USDJPY", "Custom symbol string")
+tfLabel = input.string("H1", "Timeframe label sent")
+sendEveryClosedBar = input.bool(true, "Send every confirmed bar")
+sendDirectionalHint = input.bool(true, "Send EMA directional hint")
+onlyRegistryTradable = input.bool(true, "Block non-tradable registry pairs")
+equityInput = input.float(200.0, "Account equity to report", minval=0.0)
+typSpreadPips = input.float(1.4, "Fallback spread estimate (pips)", minval=0.0, step=0.1)
+maxAlertsPerDay = input.int(24, "Max alerts per UTC day", minval=1, maxval=48)
 
-// ---------------- core indicators ----------------
-ema20  = ta.ema(close, 20)
-ema50  = ta.ema(close, 50)
+// Optional chart-side throttles. Defaults keep Pine close to a pure feed.
+requireH1 = input.bool(true, "Require chart timeframe H1/60")
+useSessionFilter = input.bool(false, "Use session filter")
+sessionMode = input.string("London + NY", "Session mode", options=["NY only", "London + NY", "Overlap only"])
+utcLondonStart = input.int(7, "London start UTC", minval=0, maxval=23)
+utcLondonEnd = input.int(17, "London end UTC (excl)", minval=0, maxval=24)
+utcNyStart = input.int(12, "NY start UTC", minval=0, maxval=23)
+utcNyEnd = input.int(21, "NY end UTC (excl)", minval=0, maxval=24)
+
+//==============================================================================
+// Helpers
+//==============================================================================
+symbolOut =
+     pairPreset == "Custom"
+         ? str.upper(str.replace_all(str.replace_all(customSymbol, "_", ""), "-", ""))
+         : pairPreset
+
+isJpy = str.substring(symbolOut, math.max(str.length(symbolOut) - 3, 0), str.length(symbolOut)) == "JPY"
+pip = isJpy ? 0.01 : 0.0001
+
+f_num(_x) => str.tostring(nz(_x, 0.0))
+f_int(_x) => str.tostring(int(_x))
+f_q(_s) => "\"" + _s + "\""
+f_pair_is_tradable(_sym) => _sym == "USDJPY"
+
+f_ret(_src, _n) =>
+    _src[_n] != 0.0 ? (_src / _src[_n]) - 1.0 : 0.0
+
+f_safe_div(_num, _den) =>
+    _den != 0.0 ? _num / _den : 0.0
+
+f_adx(_len, _smooth) =>
+    [_p, _m, _a] = ta.dmi(_len, _smooth)
+    _a
+
+//==============================================================================
+// Core H1/model features
+//==============================================================================
+ema20 = ta.ema(close, 20)
+ema50 = ta.ema(close, 50)
+ema100 = ta.ema(close, 100)
 ema200 = ta.ema(close, 200)
-rsi14  = ta.rsi(close, 14)
-atr14  = ta.atr(14)
-[macdLine, signalLine, macdHist] = ta.macd(close, 12, 26, 9)
-[diPlus, diMinus, adx14] = ta.dmi(14, 14)
 
-// Bollinger width (in pips)
-bbBasis = ta.sma(close, 20)
-bbDev   = 2.0 * ta.stdev(close, 20)
-bbUpper = bbBasis + bbDev
-bbLower = bbBasis - bbDev
-bbw     = (bbUpper - bbLower) / pip
+rsi14 = ta.rsi(close, 14)
+rsi7 = ta.rsi(close, 7)
+atr14 = ta.atr(14)
+atr14_pips = atr14 / pip
 
-// Returns
-ret1  = close / close[1]  - 1.0
-ret3  = close / close[3]  - 1.0
-ret6  = close / close[6]  - 1.0
-ret12 = close / close[12] - 1.0
-ret24 = close / close[24] - 1.0
+[plusDI14, minusDI14, adx14] = ta.dmi(14, 14)
+[macdLine, macdSignal, macdHist] = ta.macd(close, 12, 26, 9)
+macdh_pips = macdHist / pip
 
-// Distances from EMAs (pips) and slopes (pips)
-d20 = (close - ema20)  / pip
-d50 = (close - ema50)  / pip
-d200= (close - ema200) / pip
-s20 = (ema20  - ema20[3])  / pip
-s50 = (ema50  - ema50[6])  / pip
-s200= (ema200 - ema200[12]) / pip
+bbMid = ta.sma(close, 20)
+bbStd = ta.stdev(close, 20)
+bbUpper = bbMid + 2.0 * bbStd
+bbLower = bbMid - 2.0 * bbStd
+bbWidth = bbUpper - bbLower
+bb_width_pips = bbWidth / pip
+bb_pos = f_safe_div(close - bbLower, bbWidth)
 
-// Spread
-spread_c    = typSpreadPips * pip
+ret1 = f_ret(close, 1)
+ret2 = f_ret(close, 2)
+ret3 = f_ret(close, 3)
+ret6 = f_ret(close, 6)
+ret12 = f_ret(close, 12)
+ret24 = f_ret(close, 24)
+
+range_pips = (high - low) / pip
+body_pips = (close - open) / pip
+upper_wick_pips = (high - math.max(open, close)) / pip
+lower_wick_pips = (math.min(open, close) - low) / pip
+
+dist_ema20_pips = (close - ema20) / pip
+dist_ema50_pips = (close - ema50) / pip
+dist_ema100_pips = (close - ema100) / pip
+dist_ema200_pips = (close - ema200) / pip
+
+ema20_slope = (ema20 - ema20[3]) / pip
+ema50_slope = (ema50 - ema50[6]) / pip
+ema200_slope = (ema200 - ema200[12]) / pip
+
+trend_up = ema20 > ema50 ? 1 : 0
+trend_down = ema20 < ema50 ? 1 : 0
+price_above_ema200 = close > ema200 ? 1 : 0
+trend_regime = ema20 > ema50 ? 1 : ema20 < ema50 ? -1 : 0
+vol_regime = atr14 > ta.sma(atr14, 100) ? 1 : 0
+
+// The server treats volume as a feature column, but OANDA candle CSVs do not provide
+// real volume. Training uses zero, so Pine sends zero to avoid live/train drift.
+volume_feature = 0.0
+
+// Spread fields. TradingView generally lacks bid/ask on standard charts, so this uses
+// a conservative configured estimate. If you run on broker bid/ask synthetic charts,
+// keep this input aligned with the instrument's typical spread.
+spread_c = typSpreadPips * pip
 spread_pips = typSpreadPips
-spread_atr  = atr14 > 0 ? spread_c / atr14 : 0.0
+spread_atr = atr14 > 0.0 ? spread_c / atr14 : 0.0
 bid_c = close - spread_c / 2.0
 ask_c = close + spread_c / 2.0
 
-// Regimes
-trend_regime = ema20 > ema50 ? 1 : (ema20 < ema50 ? -1 : 0)
-vol_regime   = atr14 > ta.sma(atr14, 100) ? 1 : 0
+// UTC calendar features match the Python trainer's pandas convention.
+hour_utc = hour(time_close, "Etc/UTC")
+dow_raw = dayofweek(time_close, "Etc/UTC")
+day_of_week = (dow_raw + 5) % 7
+month_utc = month(time_close, "Etc/UTC")
+hour_sin = math.sin(2.0 * math.pi * hour_utc / 24.0)
+hour_cos = math.cos(2.0 * math.pi * hour_utc / 24.0)
+dow_sin = math.sin(2.0 * math.pi * day_of_week / 7.0)
+dow_cos = math.cos(2.0 * math.pi * day_of_week / 7.0)
 
-// Time fields (UTC)
-hourUtc = hour(time_close, "UTC")
-dowUtc  = (dayofweek(time_close, "UTC") + 5) % 7   // -> Mon=0 .. Sun=6 (pandas convention)
-monUtc  = month(time_close, "UTC")
-sessionCode = hourUtc < 7 ? 0 : (hourUtc < 12 ? 1 : (hourUtc < 17 ? 2 : 3))
+inLondon = hour_utc >= utcLondonStart and hour_utc < utcLondonEnd
+inNY = hour_utc >= utcNyStart and hour_utc < utcNyEnd
+inOverlap = inLondon and inNY
+sessionInt = inOverlap ? 3 : inLondon ? 1 : inNY ? 2 : 0
+sessionOK =
+     not useSessionFilter
+         ? true
+         : sessionMode == "NY only"
+             ? (sessionInt == 2 or sessionInt == 3)
+             : sessionMode == "Overlap only"
+                 ? sessionInt == 3
+                 : (sessionInt == 1 or sessionInt == 2 or sessionInt == 3)
 
-// Higher-timeframe context (confirmed bars). Helper returns just the ADX component.
-f_adx() =>
-    [_p, _m, _a] = ta.dmi(14, 14)
-    _a
-ema50_h4 = request.security(syminfo.tickerid, "240", ta.ema(close, 50), lookahead=barmerge.lookahead_off)
-adx14_h4 = request.security(syminfo.tickerid, "240", f_adx(),           lookahead=barmerge.lookahead_off)
-ema20_d1 = request.security(syminfo.tickerid, "D",   ta.ema(close, 20), lookahead=barmerge.lookahead_off)
-rsi14_d1 = request.security(syminfo.tickerid, "D",   ta.rsi(close, 14), lookahead=barmerge.lookahead_off)
+// Higher timeframe guard context expected by the server.
+ema50_h4 = request.security(syminfo.tickerid, "240", ta.ema(close, 50), barmerge.gaps_off, barmerge.lookahead_off)
+adx14_h4 = request.security(syminfo.tickerid, "240", f_adx(14, 14), barmerge.gaps_off, barmerge.lookahead_off)
+ema20_d1 = request.security(syminfo.tickerid, "D", ta.ema(close, 20), barmerge.gaps_off, barmerge.lookahead_off)
+rsi14_d1 = request.security(syminfo.tickerid, "D", ta.rsi(close, 14), barmerge.gaps_off, barmerge.lookahead_off)
 
-// Directional hint (optional)
-hint = ema20 > ema50 and close > ema200 ? "BUY" : (ema20 < ema50 and close < ema200 ? "SELL" : "")
+hintSide = ema20 > ema50 and close > ema200 ? "BUY" : ema20 < ema50 and close < ema200 ? "SELL" : ""
 
-// ---------------- build JSON payload ----------------
-f(x) => str.tostring(x)
-q(s) => "\"" + s + "\""
+//==============================================================================
+// Alert controls
+//==============================================================================
+var int alertsToday = 0
+var int lastDayKey = na
+dayKey = year(time_close, "Etc/UTC") * 10000 + month_utc * 100 + dayofmonth(time_close, "Etc/UTC")
 
-json = "{" +
-  q("type")   + ":" + q("fx") + "," +
-  q("symbol") + ":" + q(sym) + "," +
-  q("tf")     + ":" + q(tfLabel) + "," +
-  q("t")      + ":" + f(int(time_close / 1000)) + "," +
-  q("mid_o")  + ":" + f(open)  + "," +
-  q("mid_h")  + ":" + f(high)  + "," +
-  q("mid_l")  + ":" + f(low)   + "," +
-  q("mid_c")  + ":" + f(close) + "," +
-  q("ema20")  + ":" + f(ema20)  + "," +
-  q("ema50")  + ":" + f(ema50)  + "," +
-  q("ema200") + ":" + f(ema200) + "," +
-  q("rsi14")  + ":" + f(rsi14)  + "," +
-  q("adx14")  + ":" + f(adx14)  + "," +
-  q("atr14")  + ":" + f(atr14)  + "," +
-  q("macdh")  + ":" + f(macdHist) + "," +
-  q("plus_di14")  + ":" + f(diPlus)  + "," +
-  q("minus_di14") + ":" + f(diMinus) + "," +
-  q("ret1")  + ":" + f(ret1)  + "," +
-  q("ret3")  + ":" + f(ret3)  + "," +
-  q("ret6")  + ":" + f(ret6)  + "," +
-  q("ret12") + ":" + f(ret12) + "," +
-  q("ret24") + ":" + f(ret24) + "," +
-  q("d20")  + ":" + f(d20) + "," +
-  q("d50")  + ":" + f(d50) + "," +
-  q("d200") + ":" + f(d200) + "," +
-  q("s20")  + ":" + f(s20) + "," +
-  q("s50")  + ":" + f(s50) + "," +
-  q("s200") + ":" + f(s200) + "," +
-  q("bbw")  + ":" + f(bbw) + "," +
-  q("spread_c")    + ":" + f(spread_c)    + "," +
-  q("spread_pips") + ":" + f(spread_pips) + "," +
-  q("spread_atr")  + ":" + f(spread_atr)  + "," +
-  q("bid_c") + ":" + f(bid_c) + "," +
-  q("ask_c") + ":" + f(ask_c) + "," +
-  q("trend_regime") + ":" + f(trend_regime) + "," +
-  q("vol_regime")   + ":" + f(vol_regime)   + "," +
-  q("hour")    + ":" + f(hourUtc) + "," +
-  q("hr")      + ":" + f(hourUtc) + "," +
-  q("dow")     + ":" + f(dowUtc)  + "," +
-  q("month")   + ":" + f(monUtc)  + "," +
-  q("session") + ":" + f(sessionCode) + "," +
-  q("ema50_h4") + ":" + f(ema50_h4) + "," +
-  q("adx14_h4") + ":" + f(adx14_h4) + "," +
-  q("ema20_d1") + ":" + f(ema20_d1) + "," +
-  q("rsi14_d1") + ":" + f(rsi14_d1) + "," +
-  q("equity") + ":" + f(equityInput) +
-  (sendHint and hint != "" ? "," + q("hint_side") + ":" + q(hint) : "") +
-  "}"
+if na(lastDayKey) or dayKey != lastDayKey
+    alertsToday := 0
+    lastDayKey := dayKey
 
-// ---------------- fire once per closed bar ----------------
-if barstate.isconfirmed
+tfOK = not requireH1 or timeframe.period == "60" or timeframe.period == "1H"
+tradableOK = not onlyRegistryTradable or f_pair_is_tradable(symbolOut)
+dailyOK = alertsToday < maxAlertsPerDay
+sendOK = barstate.isconfirmed and sendEveryClosedBar and tfOK and tradableOK and sessionOK and dailyOK
+
+//==============================================================================
+// JSON payload
+//==============================================================================
+t_sec = int(time_close / 1000)
+
+json = "{"
+  + "\"type\":\"fx\""
+  + ",\"symbol\":" + f_q(symbolOut)
+  + ",\"tf\":" + f_q(tfLabel)
+  + ",\"t\":" + f_int(t_sec)
+  + ",\"mid_o\":" + f_num(open)
+  + ",\"mid_h\":" + f_num(high)
+  + ",\"mid_l\":" + f_num(low)
+  + ",\"mid_c\":" + f_num(close)
+  + ",\"bid_c\":" + f_num(bid_c)
+  + ",\"ask_c\":" + f_num(ask_c)
+  + ",\"spread_c\":" + f_num(spread_c)
+  + ",\"spread_pips\":" + f_num(spread_pips)
+  + ",\"spread_atr\":" + f_num(spread_atr)
+  + ",\"ema20\":" + f_num(ema20)
+  + ",\"ema50\":" + f_num(ema50)
+  + ",\"ema100\":" + f_num(ema100)
+  + ",\"ema200\":" + f_num(ema200)
+  + ",\"rsi14\":" + f_num(rsi14)
+  + ",\"rsi7\":" + f_num(rsi7)
+  + ",\"atr14\":" + f_num(atr14)
+  + ",\"atr14_pips\":" + f_num(atr14_pips)
+  + ",\"adx14\":" + f_num(adx14)
+  + ",\"plus_di14\":" + f_num(plusDI14)
+  + ",\"minus_di14\":" + f_num(minusDI14)
+  + ",\"macdh\":" + f_num(macdHist)
+  + ",\"macdh_pips\":" + f_num(macdh_pips)
+  + ",\"bb_width_pips\":" + f_num(bb_width_pips)
+  + ",\"bb_pos\":" + f_num(bb_pos)
+  + ",\"bbw\":" + f_num(bb_width_pips)
+  + ",\"ret1\":" + f_num(ret1)
+  + ",\"ret2\":" + f_num(ret2)
+  + ",\"ret3\":" + f_num(ret3)
+  + ",\"ret6\":" + f_num(ret6)
+  + ",\"ret12\":" + f_num(ret12)
+  + ",\"ret24\":" + f_num(ret24)
+  + ",\"range_pips\":" + f_num(range_pips)
+  + ",\"body_pips\":" + f_num(body_pips)
+  + ",\"upper_wick_pips\":" + f_num(upper_wick_pips)
+  + ",\"lower_wick_pips\":" + f_num(lower_wick_pips)
+  + ",\"dist_ema20_pips\":" + f_num(dist_ema20_pips)
+  + ",\"dist_ema50_pips\":" + f_num(dist_ema50_pips)
+  + ",\"dist_ema100_pips\":" + f_num(dist_ema100_pips)
+  + ",\"dist_ema200_pips\":" + f_num(dist_ema200_pips)
+  + ",\"ema20_slope\":" + f_num(ema20_slope)
+  + ",\"ema50_slope\":" + f_num(ema50_slope)
+  + ",\"ema200_slope\":" + f_num(ema200_slope)
+  + ",\"d20\":" + f_num(dist_ema20_pips)
+  + ",\"d50\":" + f_num(dist_ema50_pips)
+  + ",\"d200\":" + f_num(dist_ema200_pips)
+  + ",\"s20\":" + f_num(ema20_slope)
+  + ",\"s50\":" + f_num(ema50_slope)
+  + ",\"s200\":" + f_num(ema200_slope)
+  + ",\"hour_utc\":" + f_num(hour_utc)
+  + ",\"day_of_week\":" + f_num(day_of_week)
+  + ",\"month\":" + f_num(month_utc)
+  + ",\"hour_sin\":" + f_num(hour_sin)
+  + ",\"hour_cos\":" + f_num(hour_cos)
+  + ",\"dow_sin\":" + f_num(dow_sin)
+  + ",\"dow_cos\":" + f_num(dow_cos)
+  + ",\"hour\":" + f_num(hour_utc)
+  + ",\"hr\":" + f_num(hour_utc)
+  + ",\"dow\":" + f_num(day_of_week)
+  + ",\"session\":" + f_num(sessionInt)
+  + ",\"trend_up\":" + f_num(trend_up)
+  + ",\"trend_down\":" + f_num(trend_down)
+  + ",\"price_above_ema200\":" + f_num(price_above_ema200)
+  + ",\"trend_regime\":" + f_num(trend_regime)
+  + ",\"vol_regime\":" + f_num(vol_regime)
+  + ",\"volume\":" + f_num(volume_feature)
+  + ",\"ema50_h4\":" + f_num(ema50_h4)
+  + ",\"adx14_h4\":" + f_num(adx14_h4)
+  + ",\"ema20_d1\":" + f_num(ema20_d1)
+  + ",\"rsi14_d1\":" + f_num(rsi14_d1)
+  + ",\"equity\":" + f_num(equityInput)
+  + (sendDirectionalHint and hintSide != "" ? ",\"hint_side\":" + f_q(hintSide) : "")
+  + "}"
+
+if sendOK
     alert(json, alert.freq_once_per_bar_close)
+    alertsToday += 1
 
-// Optional: show hint on the chart
-plotchar(sendHint and hint == "BUY"  and barstate.isconfirmed, "buy hint",  "▲", location.belowbar, color.green, size=size.tiny)
-plotchar(sendHint and hint == "SELL" and barstate.isconfirmed, "sell hint", "▼", location.abovebar, color.red,   size=size.tiny)
+//==============================================================================
+// Minimal visuals
+//==============================================================================
+plotchar(sendOK, title="webhook sent", char="*", location=location.top, color=color.lime, size=size.tiny)
+plotchar(not tradableOK, title="blocked non-tradable pair", char="X", location=location.top, color=color.red, size=size.tiny)
+plotchar(sendDirectionalHint and hintSide == "BUY", title="BUY hint", char="B", location=location.belowbar, color=color.green, size=size.tiny)
+plotchar(sendDirectionalHint and hintSide == "SELL", title="SELL hint", char="S", location=location.abovebar, color=color.red, size=size.tiny)
+
+plot(adx14, title="ADX14", display=display.none)
+plot(spread_pips, title="spread_pips", display=display.none)
+plot(alertsToday, title="alertsToday", display=display.none)
