@@ -89,6 +89,13 @@ for pair_dir in sorted(MODELS_DIR.iterdir()):
             thresholds = json.loads(thresholds_path.read_text())
         except Exception:
             pass
+    gate_override = {}
+    gate_override_path = pair_dir / "live_gate_override.json"
+    if gate_override_path.exists():
+        try:
+            gate_override = json.loads(gate_override_path.read_text())
+        except Exception:
+            gate_override = {}
 
     metrics = {}
     if metrics_path.exists():
@@ -139,6 +146,8 @@ for pair_dir in sorted(MODELS_DIR.iterdir()):
     elif wf["edge"]:
         tradable = True
         tradable_reason = f"cleared_walkforward (CI_lo={wf['exp_ci_lo']}, n={wf['n_trades']})"
+        real_gate = pick(gate_override.get("conf_gate"), gate_override.get("gate"), real_gate, default=real_gate)
+        real_margin = pick(gate_override.get("margin_gate"), gate_override.get("margin"), real_margin, default=real_margin)
     else:
         tradable = False
         tradable_reason = (
@@ -163,6 +172,7 @@ for pair_dir in sorted(MODELS_DIR.iterdir()):
         "walkforward": wf,
         "default_gate": real_gate,
         "default_margin": real_margin,
+        "gate_override": gate_override or None,
         "sl_atr": 1.0,
         "tp_atr": 1.3,
         "summary": metrics,

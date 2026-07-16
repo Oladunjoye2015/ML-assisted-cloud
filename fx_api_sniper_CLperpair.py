@@ -233,7 +233,7 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
 # to reduce large H1 losses by blocking trades fighting H1/H4/D structure.
 # ====================================================
 TECHNICAL_REVIEW_ENABLED = os.getenv("TECHNICAL_REVIEW_ENABLED", "true").lower() == "true"
-TECHNICAL_REVIEW_REQUIRED = os.getenv("TECHNICAL_REVIEW_REQUIRED", "true").lower() == "true"
+TECHNICAL_REVIEW_REQUIRED = os.getenv("TECHNICAL_REVIEW_REQUIRED", "false").lower() == "true"
 TECH_MIN_SCORE_FOR_BUY = float(os.getenv("TECH_MIN_SCORE_FOR_BUY", "62"))
 TECH_MIN_SCORE_FOR_SELL = float(os.getenv("TECH_MIN_SCORE_FOR_SELL", "62"))
 TECH_STRONG_SCORE = float(os.getenv("TECH_STRONG_SCORE", "72"))

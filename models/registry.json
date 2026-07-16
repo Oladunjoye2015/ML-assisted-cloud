@@ -54,6 +54,7 @@
       "walkforward": null,
       "default_gate": 0.7,
       "default_margin": 0.02,
+      "gate_override": null,
       "sl_atr": 1.0,
       "tp_atr": 1.3,
       "summary": {
@@ -285,6 +286,7 @@
       "walkforward": null,
       "default_gate": 0.64,
       "default_margin": 0.02,
+      "gate_override": null,
       "sl_atr": 1.0,
       "tp_atr": 1.3,
       "summary": {
@@ -516,6 +518,7 @@
       "walkforward": null,
       "default_gate": 0.7,
       "default_margin": 0.02,
+      "gate_override": null,
       "sl_atr": 1.0,
       "tp_atr": 1.3,
       "summary": {
@@ -747,6 +750,7 @@
       "walkforward": null,
       "default_gate": 0.68,
       "default_margin": 0.02,
+      "gate_override": null,
       "sl_atr": 1.0,
       "tp_atr": 1.3,
       "summary": {
@@ -978,6 +982,7 @@
       "walkforward": null,
       "default_gate": 0.7,
       "default_margin": 0.02,
+      "gate_override": null,
       "sl_atr": 1.0,
       "tp_atr": 1.3,
       "summary": {
@@ -1209,6 +1214,7 @@
       "walkforward": null,
       "default_gate": 0.66,
       "default_margin": 0.02,
+      "gate_override": null,
       "sl_atr": 1.0,
       "tp_atr": 1.3,
       "summary": {
@@ -1440,6 +1446,7 @@
       "walkforward": null,
       "default_gate": 0.7,
       "default_margin": 0.02,
+      "gate_override": null,
       "sl_atr": 1.0,
       "tp_atr": 1.3,
       "summary": {
@@ -1680,6 +1687,7 @@
       },
       "default_gate": 0.7,
       "default_margin": 0.02,
+      "gate_override": null,
       "sl_atr": 1.0,
       "tp_atr": 1.3,
       "summary": {
@@ -1920,6 +1928,7 @@
       },
       "default_gate": 0.7,
       "default_margin": 0.02,
+      "gate_override": null,
       "sl_atr": 1.0,
       "tp_atr": 1.3,
       "summary": {
@@ -2151,6 +2160,7 @@
       "walkforward": null,
       "default_gate": 0.66,
       "default_margin": 0.02,
+      "gate_override": null,
       "sl_atr": 1.0,
       "tp_atr": 1.3,
       "summary": {
@@ -2382,6 +2392,7 @@
       "walkforward": null,
       "default_gate": 0.7,
       "default_margin": 0.02,
+      "gate_override": null,
       "sl_atr": 1.0,
       "tp_atr": 1.3,
       "summary": {
@@ -2613,6 +2624,7 @@
       "walkforward": null,
       "default_gate": 0.7,
       "default_margin": 0.02,
+      "gate_override": null,
       "sl_atr": 1.0,
       "tp_atr": 1.3,
       "summary": {
@@ -2844,6 +2856,7 @@
       "walkforward": null,
       "default_gate": 0.7,
       "default_margin": 0.02,
+      "gate_override": null,
       "sl_atr": 1.0,
       "tp_atr": 1.3,
       "summary": {
@@ -3075,6 +3088,7 @@
       "walkforward": null,
       "default_gate": 0.66,
       "default_margin": 0.02,
+      "gate_override": null,
       "sl_atr": 1.0,
       "tp_atr": 1.3,
       "summary": {
@@ -3306,6 +3320,7 @@
       "walkforward": null,
       "default_gate": 0.64,
       "default_margin": 0.02,
+      "gate_override": null,
       "sl_atr": 1.0,
       "tp_atr": 1.3,
       "summary": {
@@ -3537,6 +3552,7 @@
       "walkforward": null,
       "default_gate": 0.7,
       "default_margin": 0.02,
+      "gate_override": null,
       "sl_atr": 1.0,
       "tp_atr": 1.3,
       "summary": {
@@ -3768,6 +3784,7 @@
       "walkforward": null,
       "default_gate": 0.7,
       "default_margin": 0.02,
+      "gate_override": null,
       "sl_atr": 1.0,
       "tp_atr": 1.3,
       "summary": {
@@ -4006,8 +4023,29 @@
         "model": "lightgbm",
         "source": "walk_forward_results.json"
       },
-      "default_gate": 0.7,
+      "default_gate": 0.54,
       "default_margin": 0.02,
+      "gate_override": {
+        "pair": "USDJPY",
+        "model": "lightgbm",
+        "conf_gate": 0.54,
+        "margin_gate": 0.02,
+        "reason": "Lower USDJPY live gate after fixed-gate walk-forward sweep showed positive expectancy across gates. This override is only applied by create_h1_registry.py when the pair has cleared the walk-forward edge bar.",
+        "evidence": {
+          "oos_rows": 5547,
+          "auc": 0.513732644511539,
+          "gate": 0.54,
+          "margin": 0.02,
+          "trades": 4530,
+          "precision": 0.517,
+          "expectancy_R": 0.078,
+          "exp_ci_lo": 0.046,
+          "exp_ci_hi": 0.115,
+          "cost_model": "TP_ATR win, -SL_ATR loss, minus spread_atr",
+          "folds": 5,
+          "test_fraction": 0.4
+        }
+      },
       "sl_atr": 1.0,
       "tp_atr": 1.3,
       "summary": {

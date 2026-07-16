@@ -1,0 +1,21 @@
+{
+  "pair": "USDJPY",
+  "model": "lightgbm",
+  "conf_gate": 0.54,
+  "margin_gate": 0.02,
+  "reason": "Lower USDJPY live gate after fixed-gate walk-forward sweep showed positive expectancy across gates. This override is only applied by create_h1_registry.py when the pair has cleared the walk-forward edge bar.",
+  "evidence": {
+    "oos_rows": 5547,
+    "auc": 0.513732644511539,
+    "gate": 0.54,
+    "margin": 0.02,
+    "trades": 4530,
+    "precision": 0.517,
+    "expectancy_R": 0.078,
+    "exp_ci_lo": 0.046,
+    "exp_ci_hi": 0.115,
+    "cost_model": "TP_ATR win, -SL_ATR loss, minus spread_atr",
+    "folds": 5,
+    "test_fraction": 0.4
+  }
+}

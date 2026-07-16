@@ -34,7 +34,7 @@ pairPreset = input.string(
 )
 customSymbol = input.string("USDJPY", "Custom symbol string")
 tfLabel = input.string("H1", "Timeframe label sent")
-sendEveryClosedBar = input.bool(true, "Send every confirmed bar")
+alertMode = input.string("Every bar close", "Alert mode", options=["Every bar close", "Hint changes only", "Off"])
 sendDirectionalHint = input.bool(true, "Send EMA directional hint")
 onlyRegistryTradable = input.bool(true, "Block non-tradable registry pairs")
 equityInput = input.float(200.0, "Account equity to report", minval=0.0)
@@ -171,6 +171,7 @@ ema20_d1 = request.security(syminfo.tickerid, "D", ta.ema(close, 20), barmerge.g
 rsi14_d1 = request.security(syminfo.tickerid, "D", ta.rsi(close, 14), barmerge.gaps_off, barmerge.lookahead_off)
 
 hintSide = ema20 > ema50 and close > ema200 ? "BUY" : ema20 < ema50 and close < ema200 ? "SELL" : ""
+hintChanged = hintSide != "" and hintSide != hintSide[1]
 
 //==============================================================================
 // Alert controls
@@ -186,7 +187,8 @@ if na(lastDayKey) or dayKey != lastDayKey
 tfOK = not requireH1 or timeframe.period == "60" or timeframe.period == "1H"
 tradableOK = not onlyRegistryTradable or f_pair_is_tradable(symbolOut)
 dailyOK = alertsToday < maxAlertsPerDay
-sendOK = barstate.isconfirmed and sendEveryClosedBar and tfOK and tradableOK and sessionOK and dailyOK
+modeOK = alertMode == "Every bar close" or (alertMode == "Hint changes only" and hintChanged)
+sendOK = barstate.isconfirmed and alertMode != "Off" and modeOK and tfOK and tradableOK and sessionOK and dailyOK
 
 //==============================================================================
 // JSON payload
