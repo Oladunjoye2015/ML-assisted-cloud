@@ -147,6 +147,8 @@ def main():
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     out = Path(args.out)
+    if not out.is_absolute():
+        out = REPO / out
     out.write_text(json.dumps(rows, indent=2))
 
     eligible = [r for r in rows if r.get("clears_live_bar")]

@@ -16,13 +16,20 @@ Then retrain:
     python create_h1_registry.py           # rebuild registry (real avg_auc + tradable bar)
 """
 from __future__ import annotations
-import argparse, csv, json, os, sys, time, urllib.parse, urllib.request
+import argparse, csv, json, os, ssl, sys, time, urllib.parse, urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 DATA_DIR = Path(os.getenv("DATA_DIR", REPO / "oanda_h1_ba_live"))
 MAX_PER_REQ = 5000   # OANDA hard limit per candles request
+
+try:
+    import certifi
+except Exception:
+    certifi = None
+
+SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where()) if certifi is not None else None
 
 
 def load_env():
@@ -75,7 +82,7 @@ def fetch_chunk(base, token, instrument, granularity, count, to_iso=None, from_i
         params["from"] = from_iso
     url = f"{base}/v3/instruments/{instrument}/candles?" + urllib.parse.urlencode(params)
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
-    with urllib.request.urlopen(req, timeout=30) as r:
+    with urllib.request.urlopen(req, timeout=30, context=SSL_CONTEXT) as r:
         return json.load(r).get("candles", [])
 
 

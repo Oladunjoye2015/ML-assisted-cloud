@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import shutil
 
 MODELS_DIR = Path("models")
 
@@ -71,11 +72,13 @@ for pair_dir in sorted(MODELS_DIR.iterdir()):
     best_type_path = pair_dir / "best_model_type.json"
     thresholds_path = pair_dir / "thresholds.json"
     metrics_path = pair_dir / "metrics.json"
+    candidate_metrics_path = pair_dir / "candidate_metrics.json"
 
     if not best_model_path.exists():
         continue
 
     best_model = "sklearn_pipeline"
+    model_path = best_model_path
     if best_type_path.exists():
         try:
             data = json.loads(best_type_path.read_text())
@@ -103,6 +106,12 @@ for pair_dir in sorted(MODELS_DIR.iterdir()):
             metrics = json.loads(metrics_path.read_text())
         except Exception:
             pass
+    candidate_metrics = {}
+    if candidate_metrics_path.exists():
+        try:
+            candidate_metrics = json.loads(candidate_metrics_path.read_text())
+        except Exception:
+            candidate_metrics = {}
 
     # AUDIT FIX (C5): the measured per-pair metrics live under metrics["best"], not at
     # the top level. The old code did metrics.get("avg_auc") or metrics.get("auc") -> both
@@ -144,6 +153,19 @@ for pair_dir in sorted(MODELS_DIR.iterdir()):
         tradable = False
         tradable_reason = "no_walkforward_evidence"
     elif wf["edge"]:
+        wf_model = str(wf.get("model") or "").lower().strip()
+        wf_model_path = pair_dir / "candidate_models" / f"{wf_model}.pkl"
+        if wf_model and wf_model_path.exists():
+            best_model = wf_model
+            shutil.copy2(wf_model_path, best_model_path)
+            best_type_path.write_text(json.dumps({"model_type": wf_model}, indent=2))
+            model_path = best_model_path
+            wf_model_metrics = candidate_metrics.get(wf_model) or {}
+            best = wf_model_metrics or best
+            real_auc = pick(wf.get("oos_auc"), wf_model_metrics.get("auc"), real_auc, default=real_auc)
+            real_pair_score = pick(wf_model_metrics.get("pair_score"), real_pair_score, default=real_pair_score)
+            real_gate = pick(wf_model_metrics.get("best_gate"), real_gate, default=real_gate)
+            real_margin = pick(wf_model_metrics.get("best_margin_gate"), real_margin, default=real_margin)
         tradable = True
         tradable_reason = f"cleared_walkforward (CI_lo={wf['exp_ci_lo']}, n={wf['n_trades']})"
         real_gate = pick(gate_override.get("conf_gate"), gate_override.get("gate"), real_gate, default=real_gate)
@@ -158,7 +180,7 @@ for pair_dir in sorted(MODELS_DIR.iterdir()):
     pairs[pair] = {
         "pair": pair,
         "best_model": best_model,
-        "model_path": f"models/{pair}/best_model.pkl",
+        "model_path": str(model_path),
         "features": feature_columns,
         # Keep a placeholder ONLY when the value is truly missing, and record that fact
         # so downstream logic (and humans) know the number is not measured.

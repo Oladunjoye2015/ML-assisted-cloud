@@ -20,7 +20,7 @@
     "tcn_block_reason": "tcn_not_trained_or_failed",
     "best_tabular_model": "logistic_regression",
     "best_tabular_precision_at_gate": 1.0,
-    "best_tabular_auc": 0.585443062656738,
+    "best_tabular_auc": 0.5730317579103861,
     "best_tabular_pair_score": 1.0,
     "tcn_precision_at_gate": null,
     "tcn_auc": null,
