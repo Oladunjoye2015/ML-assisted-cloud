@@ -215,6 +215,10 @@ def main():
             added = len(rows)
         else:
             candles = update_instrument(base, token, inst, args.granularity, latest)
+            if not candles:
+                first, last = min(rows), max(rows)
+                print(f"  {inst:8}  +    0 bars  unchanged={len(rows):6d}  {first[:10]} .. {last[:10]}  -> {out.name}")
+                continue
             for c in candles:
                 rows[c["time"]] = candle_to_row(c)
             added = len(candles)
