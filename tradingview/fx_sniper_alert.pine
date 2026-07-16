@@ -4,9 +4,10 @@
 // Current registry result after the latest retrain:
 //   Active tradable pair: USDJPY
 //   Live model: lightgbm
-//   Training validation AUC: 0.5278
-//   Walk-forward OOS AUC: 0.5137
-//   Walk-forward expectancy: +0.087R, 95% CI lower bound +0.0228R, n=1182
+//   Live gate: confidence 0.54, margin 0.02
+//   Walk-forward OOS AUC: 0.5203
+//   Walk-forward expectancy: +0.0825R, 95% CI lower bound +0.0192R, n=1244
+//   Fixed-gate research at 0.54/0.02: +0.087R, CI lower bound +0.056R, n=4624
 //
 // This script is the data transport layer only. It sends the H1 bar payload to the
 // FastAPI /predict endpoint; the server owns the ML decision, tradability gate,
@@ -43,6 +44,7 @@ maxAlertsPerDay = input.int(24, "Max alerts per UTC day", minval=1, maxval=48)
 
 // Optional chart-side throttles. Defaults keep Pine close to a pure feed.
 requireH1 = input.bool(true, "Require chart timeframe H1/60")
+requireChartSymbolMatch = input.bool(true, "Require chart symbol match")
 useSessionFilter = input.bool(false, "Use session filter")
 sessionMode = input.string("London + NY", "Session mode", options=["NY only", "London + NY", "Overlap only"])
 utcLondonStart = input.int(7, "London start UTC", minval=0, maxval=23)
@@ -57,6 +59,7 @@ symbolOut =
      pairPreset == "Custom"
          ? str.upper(str.replace_all(str.replace_all(customSymbol, "_", ""), "-", ""))
          : pairPreset
+chartSymbol = str.upper(str.replace_all(str.replace_all(syminfo.ticker, "_", ""), "-", ""))
 
 isJpy = str.substring(symbolOut, math.max(str.length(symbolOut) - 3, 0), str.length(symbolOut)) == "JPY"
 pip = isJpy ? 0.01 : 0.0001
@@ -185,10 +188,12 @@ if na(lastDayKey) or dayKey != lastDayKey
     lastDayKey := dayKey
 
 tfOK = not requireH1 or timeframe.period == "60" or timeframe.period == "1H"
+chartSymbolOK = not requireChartSymbolMatch or str.contains(chartSymbol, symbolOut)
 tradableOK = not onlyRegistryTradable or f_pair_is_tradable(symbolOut)
+readyOK = not na(ema200) and not na(ema200_slope) and not na(atr14) and not na(adx14) and not na(bb_pos)
 dailyOK = alertsToday < maxAlertsPerDay
 modeOK = alertMode == "Every bar close" or (alertMode == "Hint changes only" and hintChanged)
-sendOK = barstate.isconfirmed and alertMode != "Off" and modeOK and tfOK and tradableOK and sessionOK and dailyOK
+sendOK = barstate.isconfirmed and alertMode != "Off" and readyOK and modeOK and tfOK and chartSymbolOK and tradableOK and sessionOK and dailyOK
 
 //==============================================================================
 // JSON payload
@@ -198,7 +203,11 @@ t_sec = int(time_close / 1000)
 json = "{"
   + "\"type\":\"fx\""
   + ",\"symbol\":" + f_q(symbolOut)
+  + ",\"chart_symbol\":" + f_q(chartSymbol)
   + ",\"tf\":" + f_q(tfLabel)
+  + ",\"pine_profile\":\"usdjpy_lightgbm_20260716\""
+  + ",\"pine_conf_gate\":0.54"
+  + ",\"pine_margin_gate\":0.02"
   + ",\"t\":" + f_int(t_sec)
   + ",\"mid_o\":" + f_num(open)
   + ",\"mid_h\":" + f_num(high)
@@ -281,6 +290,8 @@ if sendOK
 // Minimal visuals
 //==============================================================================
 plotchar(sendOK, title="webhook sent", char="*", location=location.top, color=color.lime, size=size.tiny)
+plotchar(not readyOK, title="warming up", char="W", location=location.top, color=color.gray, size=size.tiny)
+plotchar(not chartSymbolOK, title="blocked chart mismatch", char="M", location=location.top, color=color.orange, size=size.tiny)
 plotchar(not tradableOK, title="blocked non-tradable pair", char="X", location=location.top, color=color.red, size=size.tiny)
 plotchar(sendDirectionalHint and hintSide == "BUY", title="BUY hint", char="B", location=location.belowbar, color=color.green, size=size.tiny)
 plotchar(sendDirectionalHint and hintSide == "SELL", title="SELL hint", char="S", location=location.abovebar, color=color.red, size=size.tiny)
